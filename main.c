@@ -57,6 +57,30 @@
 #define STATUS_MIN 0
 
 int isolate_child(void) {
+	int ret = 0;
+	sigset_t set;
+
+	ret = sigemptyset(&set);
+	if (ret) {
+		perror("sigemptyset");
+		return 1;
+	}
+	ret = sigaddset(&set, SIGTTOU);
+	if (ret) {
+		perror("sigaddset");
+		return 1;
+	}
+	ret = sigaddset(&set, SIGTTIN);
+	if (ret) {
+		perror("sigaddset");
+		return 1;
+	}
+	ret = sigprocmask(SIG_BLOCK, &set, NULL);
+	if (ret) {
+		perror("sigprocmask");
+		return 1;
+	}
+
 	// Put the child into a new process group.
 	if (setpgid(0, 0) < 0) {
 		perror("setpgid");
@@ -66,9 +90,8 @@ int isolate_child(void) {
 	// If there is a tty, allocate it to this new process group. We
 	// can do this in the child process because we're blocking
 	// SIGTTIN / SIGTTOU.
-
 	// Doing it in the child process avoids a race condition scenario
-	// if Tini is calling Tini (in which case the grandparent may make the
+	// if urunit is calling urunit (in which case the grandparent may make the
 	// parent the foreground process group, and the actual child ends up...
 	// in the background!)
 	if (tcsetpgrp(STDIN_FILENO, getpgrp())) {
@@ -93,6 +116,12 @@ int spawn_app(int argc, char *argv[], pid_t *child_pid) {
 		char *tmp_arg = argv[i];
 
 		if (tmp_arg[0] == '\'') {
+			// The below is safe since the tmp_arg has at least one char
+			uint32_t last_char = strlen(tmp_arg) - 1;
+			if (tmp_arg[last_char] == '\'') {
+				new_argv[new_argc++] = argv[i];
+				continue;
+			}
 			// This arg (and everything until we encounter a ')
 			// is part of the same argument
 			int j = 0;
@@ -130,6 +159,12 @@ int spawn_app(int argc, char *argv[], pid_t *child_pid) {
 			new_argv[new_argc++] = strdup(buffer);
 			break;
 		} else if (tmp_arg[0] == '"') {
+			// The below is safe since the tmp_arg has at least one char
+			uint32_t last_char = strlen(tmp_arg) - 1;
+			if (tmp_arg[last_char] == '"') {
+				new_argv[new_argc++] = argv[i];
+				continue;
+			}
 			// This arg (and everything until we encounter a ")
 			// is part of the same argument
 			int j = 0;
