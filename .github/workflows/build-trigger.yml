@@ -1,0 +1,61 @@
+name: Build/publish urunit
+
+on:
+  pull_request:
+    branches: ["main"]
+  push:
+    branches: ["main"]
+  workflow_dispatch: # build on demand
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  get-changed-files:
+    runs-on: ubuntu-latest
+    outputs:
+      version_files: ${{ steps.filter.outputs.version_files}}
+      version: ${{ steps.filter.outputs.version }}
+      dockerfile_files: ${{ steps.filter.outputs.dockerfile_files}}
+      dockerfile: ${{ steps.filter.outputs.dockerfile }}
+      c_files: ${{ steps.filter.outputs.c_files}}
+      c: ${{ steps.filter.outputs.c }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v3
+
+      - name: Get Changed Files
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          list-files: 'json'
+          base: 'main'
+          filters: |
+            version:
+              - 'VERSION'
+            dockerfile:
+              - 'Dockerfile'
+            c:
+              - 'Makefile'
+              - 'main.c'
+
+      - name: Show Changed Files
+        run: |
+          echo "Files in dockerfile: ${{ steps.filter.outputs.dockerfile_files }}"
+          echo "Files for version: ${{ steps.filter.outputs.version_files }}"
+          echo "Files in c: ${{ steps.filter.outputs.c_files }}"
+          echo "dockerfile: ${{ steps.filter.outputs.dockerfile}}"
+          echo "c: ${{ steps.filter.outputs.c}}"
+          echo "version: ${{ steps.filter.outputs.version}}"
+
+  build-urunit:
+    needs: [get-changed-files]
+    name: Urunit
+    if: ${{ needs.get-changed-files.outputs.c == 'true' || needs.get-changed-files.outputs.dockerfile == 'true' || needs.get-changed-files.outputs.version == 'true' }}
+    uses: ./.github/workflows/build.yml
+    secrets: inherit
+    with:
+      runner: '["base", "dind", "2204"]'
+      runner-archs: '["amd64", "arm64"]'
+      version-tag: ${{ needs.get-changed-files.outputs.version == 'true' }}
