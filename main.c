@@ -45,6 +45,10 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/prctl.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <linux/route.h>
+#include <netinet/in.h>
 
 #include <errno.h>
 #include <string.h>
@@ -55,6 +59,7 @@
 
 #define STATUS_MAX 255
 #define STATUS_MIN 0
+#define ETH0_IF "eth0"
 
 int isolate_child(void) {
 	int ret = 0;
@@ -290,10 +295,55 @@ int reap(const pid_t child_pid, int *child_exitcode_ptr) {
 	return 0;
 }
 
+int set_default_route() {
+	int sockfd;
+	struct rtentry rt;
+	struct sockaddr_in addr;
+	int ret = 0;
+
+	sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+	if (sockfd == -1) {
+		perror("socket creation failed");
+		return 1;
+	}
+
+	memset(&rt, 0, sizeof(rt));
+
+	// Set default route for any IP address
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = INADDR_ANY;
+	memcpy(&rt.rt_dst, &addr, sizeof(addr));
+
+	memcpy(&rt.rt_genmask, &addr, sizeof(addr));
+
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = 0;
+	memcpy(&rt.rt_gateway, &addr, sizeof(addr));
+
+	rt.rt_flags = RTF_UP;
+	// TODO: We might want to doscover or somehow
+	// get the interface as a parameter.
+	rt.rt_dev = ETH0_IF;
+
+	ret = ioctl(sockfd, SIOCADDRT, &rt);
+	if(ret < 0) {
+		perror("ioctl SIOCADDRT");
+	}
+
+	close(sockfd);
+	return ret;
+}
+
 int main(int argc, char *argv[]) {
 	pid_t app_pid;
 	int ret = 0;
 	int app_exitcode = -1;
+
+	ret = set_default_route();
+	if (ret != 0) {
+		fprintf(stderr, "Failed to set default route\n");
+	}
 
 	ret = prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
 	if (ret < 0) {
@@ -321,5 +371,5 @@ int main(int argc, char *argv[]) {
 
 	sync();
 	syscall(SYS_reboot, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2,
-		LINUX_REBOOT_CMD_RESTART, NULL);	
+		LINUX_REBOOT_CMD_RESTART, NULL);
 }
