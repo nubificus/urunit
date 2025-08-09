@@ -40,26 +40,177 @@
 //
 // For more information, please check https://github.com/krallin/tini/blob/master/LICENSE
 
-#include <linux/reboot.h>
+
 #include <sys/syscall.h>
-#include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+
+#include <linux/reboot.h>
 #include <linux/route.h>
+
 #include <netinet/in.h>
 
+#include <ctype.h>
 #include <errno.h>
-#include <string.h>
+#include <pwd.h>
+#include <grp.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
+#include <dirent.h>
 #include <unistd.h>
+
+#define SMBIOS_TABLE_PATH "/sys/firmware/dmi/tables/DMI"
 
 #define STATUS_MAX 255
 #define STATUS_MIN 0
 #define ETH0_IF "eth0"
+
+// SMBIOS table header
+struct smbios_header {
+    uint8_t type;
+    uint8_t length;
+    uint16_t handle;
+};
+
+static unsigned char b64_table[256];
+
+void base64_init_table() {
+    memset(b64_table, 0x80, 256);
+    const char *alphabet =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    for (int i = 0; alphabet[i]; i++) {
+        b64_table[(unsigned char)alphabet[i]] = i;
+    }
+    b64_table[(unsigned char)'='] = 0;
+}
+
+char *base64_decode_str(const char *src) {
+    size_t len = strlen(src);
+    unsigned char *out = malloc((len * 3) / 4 + 1);
+    if (!out) return NULL;
+
+    size_t out_len = 0;
+    uint32_t buffer = 0;
+    int bits = 0;
+
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)src[i];
+        if (isspace(c)) continue;
+        unsigned char val = b64_table[c];
+        if (val & 0x80) continue;
+
+        buffer = (buffer << 6) | val;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out[out_len++] = (buffer >> bits) & 0xFF;
+        }
+    }
+    out[out_len] = '\0';
+    return (char*)out;
+}
+
+const char *get_smbios_string(const char *start, size_t struct_len, uint8_t str_index) {
+    if (str_index == 0)
+        return NULL;
+    const char *str_ptr = start + struct_len;
+    int current_index = 1;
+    while (current_index < str_index && *str_ptr) {
+        str_ptr += strlen(str_ptr) + 1;
+        current_index++;
+    }
+    if (*str_ptr == 0)
+        return NULL;
+    return str_ptr;
+}
+
+void parse_smbios_type11_and_setenv(const char *struct_start, uint8_t length) {
+    uint8_t count = (uint8_t)struct_start[4];
+
+    for (int i = 1; i <= count; i++) {
+        const char *s = get_smbios_string(struct_start, length, i);
+        if (!s) continue;
+
+        char *tmp = strdup(s);
+        if (!tmp) continue;
+
+        char *eq = strchr(tmp, '=');
+        if (eq) {
+            *eq = '\0';
+            const char *key = tmp;
+            const char *encoded = eq + 1;
+
+            char *decoded = base64_decode_str(encoded);
+            if (decoded) {
+                setenv(key, decoded, 1);
+                free(decoded);
+            }
+        }
+        free(tmp);
+    }
+}
+
+void import_smbios_type11_envvars() {
+    FILE *f = fopen(SMBIOS_TABLE_PATH, "rb");
+    if (!f) {
+        perror("Failed to open SMBIOS table");
+        return;
+    }
+
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    rewind(f);
+    if (size <= 0) {
+        fclose(f);
+        return;
+    }
+
+    char *buffer = malloc(size);
+    if (!buffer) {
+        fclose(f);
+        return;
+    }
+    fread(buffer, 1, size, f);
+    fclose(f);
+
+    size_t pos = 0;
+    while (pos + sizeof(struct smbios_header) <= (size_t)size) {
+        struct smbios_header *hdr = (struct smbios_header *)(buffer + pos);
+
+        if (hdr->length < sizeof(struct smbios_header)) break;
+
+        size_t struct_start = pos;
+        size_t formatted_len = hdr->length;
+        size_t str_area = struct_start + formatted_len;
+        size_t str_len = 0;
+        while (str_area + str_len + 1 < (size_t)size) {
+            if (buffer[str_area + str_len] == 0 &&
+                buffer[str_area + str_len + 1] == 0) {
+                str_len += 2;
+                break;
+            }
+            str_len++;
+        }
+
+        size_t total_len = formatted_len + str_len;
+
+        if (hdr->type == 11) {
+            parse_smbios_type11_and_setenv(buffer + struct_start, hdr->length);
+        }
+
+        pos += total_len;
+        if (hdr->type == 127) break;
+    }
+    free(buffer);
+}
 
 int isolate_child(void) {
 	int ret = 0;
@@ -108,6 +259,23 @@ int isolate_child(void) {
 
 	return 0;
 }
+
+extern char **environ;
+
+#if 0
+void append_nameserver() {
+    FILE *f = fopen("/etc/resolv.conf", "a");  // open for appending
+    if (!f) {
+        perror("Failed to open /etc/resolv.conf");
+        return;
+    }
+
+    // Append the nameserver line
+    fprintf(f, "\nnameserver 8.8.8.8\n");
+
+    fclose(f);
+}
+#endif
 
 int spawn_app(int argc, char *argv[], pid_t *child_pid) {
 	int i = 0;
@@ -211,7 +379,6 @@ int spawn_app(int argc, char *argv[], pid_t *child_pid) {
 		}
 	}
 	new_argv[new_argc] = NULL;
-
 	pid = fork();
 	if (pid < 0) {
 		perror("fork");
@@ -219,10 +386,88 @@ int spawn_app(int argc, char *argv[], pid_t *child_pid) {
 	} else if (pid == 0) {
 		int status = 1;
 
+
+		// After clone or unshare(CLONE_NEWNS), do:
+		if (mount("proc", "/proc", "proc", MS_NOSUID|MS_NOEXEC|MS_NODEV, NULL) < 0) {
+		    perror("mount /proc");
+		    return 1;
+		}
+
+		if (mount("sysfs", "/sys", "sysfs", 0, NULL) < 0) {
+		    perror("mount /sys");
+		    return 1;
+		}
+
+		if (mount("tmpfs", "/tmp", "tmpfs", 0, "mode=1777") < 0) {
+		    perror("mount /tmp");
+		    return 1;
+		}
+
+
+		mkdir("/dev/pts", 0755);
+		if (mount("devpts", "/dev/pts", "devpts", 0, "gid=5,mode=620") < 0) {
+		    perror("mount /dev/pts");
+		    return 1;
+		}
+
+		//FIXME
+		struct rlimit rl;
+		rl.rlim_cur = 65535;
+		rl.rlim_max = 65535;
+
+		if (setrlimit(RLIMIT_NOFILE, &rl) != 0) {
+		    perror("setrlimit RLIMIT_NOFILE");
+		}
+
+		FILE *f = fopen("/proc/sys/vm/max_map_count", "w");
+		if (f) {
+		    fprintf(f, "262144\n");
+		    fclose(f);
+		} else {
+		    perror("fopen max_map_count");
+		}
+
 		// Put the child in a process group and
 		// make it the foreground process if there is a tty.
 		if (isolate_child()) {
 			return 1;
+		}
+
+		base64_init_table();
+    		import_smbios_type11_envvars();
+
+		// Print current environment
+		printf("== Environment passed to execvp() ==\n");
+		for (char **env = environ; *env != NULL; env++) {
+			printf("%s\n", *env);
+		}
+		printf("====================================\n");
+
+		//FIXME set UID/GID
+		setenv("USER", "elasticsearch", 1);
+#define TARGET_UID 1000
+#define TARGET_GID 1000
+
+		if (setgid(TARGET_GID) < 0) {
+		    perror("setgid");
+		    exit(1);
+		}
+
+		if (setuid(TARGET_UID) < 0) {
+		    perror("setuid");
+		    exit(1);
+		}
+
+		//FIXME
+		printf("Chdir to home, and launch!\n");
+
+		const char *home = getenv("HOME");
+		if (!home) {
+			fprintf(stderr, "HOME environment variable not set, non Fatal\n");
+		}
+
+		if (chdir(home) != 0) {
+			perror("chdir to HOME failed, non Fatal");
 		}
 
 		execvp(new_argv[0], new_argv);
@@ -335,6 +580,31 @@ int set_default_route() {
 	return ret;
 }
 
+int set_mtu(const char *ifname, int mtu) {
+    int sockfd;
+    struct ifreq ifr;
+
+    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sockfd < 0) {
+        perror("socket");
+        return -1;
+    }
+
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, ifname, IFNAMSIZ-1);
+    ifr.ifr_mtu = mtu;
+
+    if (ioctl(sockfd, SIOCSIFMTU, &ifr) < 0) {
+        perror("ioctl SIOCSIFMTU");
+        close(sockfd);
+        return -1;
+    }
+
+    close(sockfd);
+    return 0;
+}
+
+
 int main(int argc, char *argv[]) {
 	pid_t app_pid;
 	int ret = 0;
@@ -343,6 +613,12 @@ int main(int argc, char *argv[]) {
 	ret = set_default_route();
 	if (ret != 0) {
 		fprintf(stderr, "Failed to set default route\n");
+	}
+
+	//FIXME
+	ret = set_mtu("eth0", 1400);
+	if (ret != 0) {
+		fprintf(stderr, "Failed to set mtu\n");
 	}
 
 	ret = prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
