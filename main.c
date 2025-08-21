@@ -123,6 +123,34 @@ int isolate_child(void) {
 	return 0;
 }
 
+int child_func(char *argv[]) {
+	int status = 1;
+
+	DEBUG_PRINT("Isolating child\n");
+	// Put the child in a process group and
+	// make it the foreground process if there is a tty.
+	if (isolate_child()) {
+		return 1;
+	}
+
+	execvp(argv[0], argv);
+
+	// execvp will only return on an error so make sure that we check the errno
+	// and exit with the correct return status for the error that we encountered
+	// See: http://www.tldp.org/LDP/abs/html/exitcodes.html#EXITCODESREF
+	switch (errno) {
+	case ENOENT:
+		status = 127;
+		break;
+	case EACCES:
+		status = 126;
+		break;
+	}
+	perror("execv failed");
+
+	return status;
+}
+
 int spawn_app(int argc, char *argv[], pid_t *child_pid) {
 	int i = 0;
 	pid_t pid;
@@ -245,30 +273,7 @@ int spawn_app(int argc, char *argv[], pid_t *child_pid) {
 		perror("fork");
 		return 1;
 	} else if (pid == 0) {
-		int status = 1;
-
-		DEBUG_PRINT("Isolating child\n");
-		// Put the child in a process group and
-		// make it the foreground process if there is a tty.
-		if (isolate_child()) {
-			return 1;
-		}
-
-		execvp(new_argv[0], new_argv);
-
-		// execvp will only return on an error so make sure that we check the errno
-		// and exit with the correct return status for the error that we encountered
-		// See: http://www.tldp.org/LDP/abs/html/exitcodes.html#EXITCODESREF
-		switch (errno) {
-		case ENOENT:
-			status = 127;
-			break;
-		case EACCES:
-			status = 126;
-			break;
-		}
-		perror("execv failed");
-		return status;
+		return child_func(new_argv);
 	} else {
 		*child_pid = pid;
 		return 0;
