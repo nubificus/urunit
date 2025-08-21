@@ -21,8 +21,10 @@ BUILD_DIR ?= ${CURDIR}/dist
 PREFIX    ?= /usr/local/bin
 
 # Binary variables
-URUNIT_BIN_DYNAMIC:= $(BUILD_DIR)/urunit_dynamic
-URUNIT_BIN_STATIC := $(BUILD_DIR)/urunit_static
+URUNIT_BIN_DYNAMIC       := $(BUILD_DIR)/urunit_dynamic
+URUNIT_BIN_DYNAMIC_DEBUG := $(BUILD_DIR)/urunit_dynamic_debug
+URUNIT_BIN_STATIC        := $(BUILD_DIR)/urunit_static
+URUNIT_BIN_STATIC_DEBUG  := $(BUILD_DIR)/urunit_static_debug
 
 # Compiler variables
 #? CC the compiler to use (default: gcc)
@@ -69,9 +71,17 @@ prepare: $(BUILD_DIR)
 .PHONY: static
 static: $(URUNIT_BIN_STATIC)
 
+## static_debug Build urunit statically-linked for host arch enabling debug logs.
+.PHONY: static_debug
+static_debug: $(URUNIT_BIN_STATIC_DEBUG)
+
 ## dynamic Build urunit dynamically-linked for host arch.
 .PHONY: dynamic
 dynamic: $(URUNIT_BIN_DYNAMIC)
+
+## dynamic_debug Build urunit dynamically-linked for host arch enabling debug logs.
+.PHONY: dynamic_debug
+dynamic_debug: $(URUNIT_BIN_DYNAMIC_DEBUG)
 
 $(BUILD_DIR):
 	mkdir -p $@
@@ -79,8 +89,14 @@ $(BUILD_DIR):
 $(URUNIT_BIN_DYNAMIC): $(URUNIT_SRC) | prepare
 	$(CC) $(CFLAGS) $(URUNIT_SRC) $(LDFLAGS) -o $@
 
+$(URUNIT_BIN_DYNAMIC_DEBUG): $(URUNIT_SRC) | prepare
+	$(CC) $(CFLAGS) -DDEBUG $(URUNIT_SRC) $(LDFLAGS) -o $@
+
 $(URUNIT_BIN_STATIC): $(URUNIT_SRC) | prepare
 	$(CC) $(CFLAGS) $(URUNIT_SRC) $(LDFLAGS) $(STATIC_LDFLAGS) -o $@
+
+$(URUNIT_BIN_STATIC_DEBUG): $(URUNIT_SRC) | prepare
+	$(CC) $(CFLAGS) -DDEBUG $(URUNIT_SRC) $(LDFLAGS) $(STATIC_LDFLAGS) -o $@
 
 ## install Install urunit in PREFIX
 .PHONY: install

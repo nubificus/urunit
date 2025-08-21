@@ -61,6 +61,20 @@
 #define STATUS_MIN 0
 #define ETH0_IF "eth0"
 
+#ifdef DEBUG
+#define SHOW_DEBUG 1
+#else
+#define SHOW_DEBUG 0
+#endif
+
+#define DEBUG_PRINTF(fmt, ...) \
+	do { if (SHOW_DEBUG) fprintf(stderr, "[DEBUG] " fmt, __VA_ARGS__); } while (0)
+
+#define DEBUG_PRINT(fmt, ...) \
+	do { if (SHOW_DEBUG) fprintf(stderr, "[DEBUG] " fmt); } while (0)
+
+extern char **environ;
+
 int isolate_child(void) {
 	int ret = 0;
 	sigset_t set;
@@ -212,6 +226,20 @@ int spawn_app(int argc, char *argv[], pid_t *child_pid) {
 	}
 	new_argv[new_argc] = NULL;
 
+	if (new_argc <= 0 || new_argv[0] == NULL) {
+		fprintf(stderr, "No application execute\n");
+		return 1;
+	}
+#ifdef DEBUG
+	printf("Starting app %s with the following arguments\n", new_argv[0]);
+	for (int i = 1; i < new_argc; i++) {
+		printf("%s\n", new_argv[i]);
+	}
+	printf("Environment variables\n");
+	for (char **env = environ; *env != NULL; env++) {
+		printf("%s\n", *env);
+	}
+#endif
 	pid = fork();
 	if (pid < 0) {
 		perror("fork");
@@ -219,6 +247,7 @@ int spawn_app(int argc, char *argv[], pid_t *child_pid) {
 	} else if (pid == 0) {
 		int status = 1;
 
+		DEBUG_PRINT("Isolating child\n");
 		// Put the child in a process group and
 		// make it the foreground process if there is a tty.
 		if (isolate_child()) {
@@ -265,19 +294,23 @@ int reap(const pid_t child_pid, int *child_exitcode_ptr) {
 		case 0:
 			break;
 		default:
+			DEBUG_PRINTF("Reaped process %d ", reaped_pid);
 			// A child was reaped. Check whether it's the app.
 			// If it is, then set the exit_code,
 			if (reaped_pid == child_pid) {
 				if (WIFEXITED(reaped_status)) {
+					DEBUG_PRINTF("with exit status %d\n", WEXITSTATUS(reaped_status));
 					// The app exited normally
 					*child_exitcode_ptr = WEXITSTATUS(reaped_status);
 				} else if (WIFSIGNALED(reaped_status)) {
+					DEBUG_PRINTF("with exit status %d\n", WTERMSIG(reaped_status));
 					/* The app was terminated. Emulate what sh / bash
 					 * would do, which is to return
 					 * 128 + signal number.
 					 */
 					*child_exitcode_ptr = 128 + WTERMSIG(reaped_status);
 				} else {
+					DEBUG_PRINT("with unknown exit status\n");
 					return 1;
 				}
 
@@ -320,6 +353,7 @@ int set_default_route() {
 	addr.sin_addr.s_addr = 0;
 	memcpy(&rt.rt_gateway, &addr, sizeof(addr));
 
+	DEBUG_PRINT("Setting default route to eth0\n");
 	rt.rt_flags = RTF_UP;
 	// TODO: We might want to doscover or somehow
 	// get the interface as a parameter.
@@ -342,24 +376,28 @@ int main(int argc, char *argv[]) {
 
 	should_set_def_route = getenv("URUNIT_DEFROUTE");
 	if (should_set_def_route) {
+		DEBUG_PRINT("URUNIT_DEFROUTE was set\n");
 		ret = set_default_route();
 		if (ret != 0) {
 			fprintf(stderr, "Failed to set default route\n");
 		}
 	}
 
+	DEBUG_PRINT("Setting subreaper\n");
 	ret = prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
 	if (ret < 0) {
 		perror("Become subreaper");
 		return 1;
 	}
 
+	DEBUG_PRINT("Spawn the app\n");
 	ret = spawn_app(argc, argv, &app_pid);
 	if (ret) {
 		fprintf(stderr, "Could not spawn app\n");
 		return ret;
 	}
 
+	DEBUG_PRINT("Starting reaping loop\n");
 	while (1) {
 		ret = reap(app_pid, &app_exitcode);
 		if (ret) {
@@ -372,6 +410,7 @@ int main(int argc, char *argv[]) {
 		}
 	}
 
+	DEBUG_PRINT("Exiting, will reboot in order to shutdown\n");
 	sync();
 	syscall(SYS_reboot, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2,
 		LINUX_REBOOT_CMD_RESTART, NULL);
