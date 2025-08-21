@@ -58,6 +58,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <ctype.h>
 
 #define STATUS_MAX 255
 #define STATUS_MIN 0
@@ -74,6 +75,12 @@
 
 #define DEBUG_PRINT(fmt, ...) \
 	do { if (SHOW_DEBUG) fprintf(stderr, fmt, __VA_ARGS__); } while (0)
+
+struct app_exec_config {
+	uint32_t uid;
+	uint32_t gid;
+	char	 *wdir;
+};
 
 struct smbios_header {
 	uint8_t type;
@@ -381,11 +388,14 @@ size_t measure_tokens(char *str_buf, size_t max_size, char tok) {
 // formatted to be passed as the environment variables table at execve and friends.
 // It is important to note, that this function will alter the given list,
 // replacing the new line characters with the end of string '\0' character.
-// The funtion retruns a dynamically allocated memory and the caller is
+// The funtion returns a dynamically allocated memory and the caller is
 // responsible to free that memory.
 //
 // Arguments:
-// 1. string_area:	The list with in the aformentioned format.
+// 1. string_area:	The list with in the aformentioned format. If this function
+//			returns successfully, then this pointer will move after the end
+//			of the environment variable list, passed the end of The
+//			"UEE" string.
 // 2. max_sz:		The max possible size of the list.
 // 3. path_env:		A pointer to a string where a pointer to the PATH environment
 //			variable will get stored (if it is found).
@@ -395,8 +405,8 @@ size_t measure_tokens(char *str_buf, size_t max_size, char tok) {
 // to a single environment variable inside the initial list.
 // Also, if the environment variable PATH was found, then path_env
 // will point to the beginning of that string inside the list.
-// Otherwise, NULL is returned.
-char **parse_envs(char *string_area, size_t max_sz, char **path_env) {
+// Otherwise, NULL is returned, path_env and offset will not change their values.
+char **parse_envs(char **string_area, size_t max_sz, char **path_env) {
 	size_t total_envs = 0;
 	char **env_vars = NULL;
 	uint8_t path_found = 0;
@@ -404,7 +414,7 @@ char **parse_envs(char *string_area, size_t max_sz, char **path_env) {
 	size_t i = 0;
 
 	// Search how many new line characters we have in the list.
-	total_envs = measure_tokens(string_area, max_sz, '\n');
+	total_envs = measure_tokens(*string_area, max_sz, '\n');
 	// If the list is correctly formatted it will start with "UES"
 	// which will not be stored and therefore, we can use this extra
 	// pointer for the end of the table (NULL), as execve and friends require.
@@ -416,15 +426,17 @@ char **parse_envs(char *string_area, size_t max_sz, char **path_env) {
 		return NULL;
 	}
 
-	tmp_env = strtok(string_area, "\n");
+	tmp_env = strtok(*string_area, "\n");
 	// Discard the first string since it is the special string "UES"
 	// Also, it is safe to call strtok, even if there was no '\n', since it will
 	// return NULL again.
 	tmp_env = strtok(NULL, "\n");
 	while (tmp_env && i < total_envs) {
 		// Check if we reached the end of the environment variable list
-		if (memcmp(tmp_env, "UEE", 3) == 0)
+		if (memcmp(tmp_env, "UEE", 3) == 0) {
+			*string_area = tmp_env + 4; // 4 bytes for the "UEE" string
 			break;
+		}
 		// Store the environment variable
 		env_vars[i] = tmp_env;
 		// If we have not found PATH yet,
@@ -454,27 +466,186 @@ char **parse_envs(char *string_area, size_t max_sz, char **path_env) {
 	return env_vars;
 }
 
-// get_env_vars_from_smbios: Reads the smbios information from SMBIOS_TABLE_PATH and
+// get_uint_val: Converst the value of "KEY: VALUE" string  to uint32_t
+//
+// Arguments:
+// 1. str:	The string to convert in the form "KEY: VAL"
+// 2. value:	A pointer to uint32_t where the converted value will get stored.
+//
+// Return value:
+// On success 0 is returned and value contains the coverted value.
+// On failure, -1 is returned and value stays intact.
+int get_uint_val(char *str, uint32_t *value) {
+	size_t str_sz = strlen(str);
+	char *val_str = strchr(str, ':');
+	unsigned long val = 0;
+	char *end = NULL;
+
+	if (val_str == NULL) {
+		// We could not find the beginning of the value string.
+		fprintf(stderr, "Failed to find ':' character in %s\n", str);
+		return -1;
+	}
+
+	// strchr will return a pointer to ':', but we need to move passed
+	// ':', hence +1 character.
+	if (val_str + 1 >= str + str_sz) {
+		// We can not go over the string. Something is wrong
+		fprintf(stderr, "Failed to find value after ':' in %s\n", str);
+		return -1;
+	}
+	val_str ++;
+
+	// strtoul can take care of spaces.
+	val = strtoul(val_str, &end, 10);
+	if (errno == ERANGE || val > UINT32_MAX) {
+		perror("Convert string to uint32_t");
+		return -1;
+	}
+	if (*end != '\0') {
+		fprintf(stderr, "Failed to convert %s to unit32_t. Got trailing character %c\n", val_str, *end);
+		return -1;
+	}
+
+	*value = (uint32_t)val;
+
+	return 0;
+}
+
+// get_string_val: Returns the string value of "KEY: VALUE" strings.
+//
+// Arguments:
+// 1. str:	The whole string in the form "KEY: VALUE"
+// 2. value:	A pointer which will point to the beginning of the VALUE
+//
+// Return value:
+// On success 0 is returned and value points to the beginning of VALUE
+// On failure, -1 is returned and value stays intact.
+int get_string_val(char *str, char **value) {
+	size_t str_sz = strlen(str);
+	char *val_str = strchr(str, ':');
+
+	if (val_str == NULL) {
+		// We could not find the beginning of the value string.
+		fprintf(stderr, "Failed to find ':' character in %s\n", str);
+		return -1;
+	}
+
+	// strchr will return a pointer to ':', but we need to move pass this character
+	// and until we find a non-space value.
+	val_str++;
+	while ((val_str < str + str_sz) && *val_str != '\0') {
+		if (!isspace(*val_str)) {
+			*value = val_str;
+
+			return 0;
+		}
+		val_str++;
+	}
+
+	// We can not go over the string. Something is wrong
+	fprintf(stderr, "Failed to find value after ':' in %s\n", str);
+
+	return -1;
+}
+
+// parse_app_exec_config: Parses a list with the following format:
+// UCS
+// UID: uid
+// GID: gid
+// WD:  working directory
+// UCE
+// It is important to note, that this function will alter the given list,
+// replacing the new line characters with the end of string '\0' character.
+// The funtion returns a dynamically allocated memory and the caller is
+// responsible to free that memory.
+//
+// Arguments:
+// 1. string_area:	The list with in the aformentioned format.
+//
+// Return value:
+// On success it returns a app_exec_config struct filled with the information
+// from the list.
+// Otherwise, NULL is returned
+struct app_exec_config *parse_app_exec_config(char *string_area) {
+	struct app_exec_config *conf = NULL;
+	char *tmp_field = NULL;
+
+	conf = malloc(sizeof(struct app_exec_config));
+	if (!conf) {
+		fprintf(stderr, "Failed to allocate memory for app execution environment info\n");
+		return NULL;
+	}
+	memset(conf, 0, sizeof(struct app_exec_config));
+	conf->wdir = NULL; // Sanity
+
+	tmp_field = strtok(string_area, "\n");
+	// Discard the first string since it is the special string "UCS"
+	// Also, it is safe to call strtok, even if there was no '\n', since it will
+	// return NULL again.
+	tmp_field = strtok(NULL, "\n");
+	while (tmp_field) {
+		int ret = 0;
+
+		// Check if we reached the end of the app execution environment
+		// configuration list
+		if (memcmp(tmp_field, "UID", 3) == 0) {
+			ret = get_uint_val(tmp_field, &(conf->uid));
+			if (ret != 0) {
+				fprintf(stderr, "Failed to retreive UID information from %s\n", tmp_field);
+				break;
+			}
+		} else 	if (memcmp(tmp_field, "GID", 3) == 0) {
+			ret = get_uint_val(tmp_field, &(conf->gid));
+			if (ret != 0) {
+				fprintf(stderr, "Failed to retreive GID information from %s\n", tmp_field);
+				break;
+			}
+		} else 	if (memcmp(tmp_field, "WD", 2) == 0) {
+			ret = get_string_val(tmp_field, &(conf->wdir));
+			if (ret != 0) {
+				fprintf(stderr, "Failed to retreive WD information from %s\n", tmp_field);
+				break;
+			}
+		} else 	if (memcmp(tmp_field, "UCE", 3) == 0) {
+			return conf;
+		}
+
+		tmp_field = strtok(NULL, "\n");
+	}
+
+	free(conf);
+	return NULL;
+}
+
+// get_config_from_smbios: Reads the smbios information from SMBIOS_TABLE_PATH and
 // searches the area that holds the Type 11 (OEM strings) information. In this area,
-// searches for the special string "UES" which denotes the beginning of the environment
-// variables list and calls parse_envs to parse the found list.
+// it searches for the app execution configuration and environment variables list.
+// The app execution configuration list starts with the line "UCS" and ends with the
+// line "UCE". Respectively, the environment variable list, starts with the "UES" line
+// and ends with the line "UES".
 //
 // Arguments:
 // 1. path_env:	A pointer to store the location of PATH environment variables
 //		inside the list, if the environment variable is found.
+// 2. exec_conf:THis is the pointer wchi will contain the config for the process
+//		execution environment after parsing the respective data.
+// 3. sbuf:	A pointer to the memory that was allocated to store the contents
+//		of the smbios file. Just return it to free it, if something goes wrong.
 //
 // Return value:
 // On success it returns a a table with environment variables formatted correctly
 // and able to be used for execve and friends. Furthermore, if PATH environment
 // variable is found, the path_env will point to the respective location.
 // On failure, it return NULL.
-char **get_env_vars_from_smbios(char **path_env, char **sbuf) {
+char **get_config_from_smbios(char **path_env, struct app_exec_config **exec_conf, char **sbuf) {
 	char **env_vars = NULL;
 	FILE *fp = NULL;
 	struct stat st = { 0 };
 	int ret = 0;
 	char *buf = NULL;
 	size_t pos = 0;
+	struct app_exec_config *econf = NULL;
 
 	fp = fopen(SMBIOS_TABLE_PATH, "rb");
 	if (!fp) {
@@ -515,13 +686,34 @@ char **get_env_vars_from_smbios(char **path_env, char **sbuf) {
 			DEBUG_PRINT("%s\n", string_area);
 			// Check if the special string "UES" is present
 			if (memcmp(string_area, "UES", 3) == 0) {
+				char *init_string_area = string_area;
 				// Extract the environment variables from the list
-				env_vars = parse_envs(string_area, st.st_size, path_env);
+				env_vars = parse_envs(&string_area, st.st_size, path_env);
 				if (!env_vars) {
 					fprintf(stderr, "Warning: No environment variables found in smbios\n");
+				}
+				// If the list was properly formatted, ending with "UEE"
+				// then string_area should differ from init_string_area
+				// Otherwise, the list was not properly formatted and
+				// we abort the parsing.
+				if (string_area == init_string_area) {
+					// We did not find the "UEE" string
 					goto get_env_vars_error_free;
 				}
-				// We found our list no reason to check further.
+
+				if (memcmp(string_area, "UCS", 3) == 0) {
+					// Extract the environment variables from the list
+					econf = parse_app_exec_config(string_area);
+					if (!econf) {
+						// We did not find the "UCE" string
+						// but we have the environment variables
+						fprintf(stderr, "Warning: No app execution environment config found\n");
+					} else {
+						*exec_conf = econf;
+					}
+				}
+
+				// We found our info no reason to check further.
 				break;
 			}
 			// TODO: There is the possibility that QEMU prepends
@@ -552,6 +744,41 @@ get_env_vars_error_free:
 get_env_vars_error:
 	fclose(fp);
 	return NULL;
+}
+
+// setup_exec_env: Sets up the process execution environment as defined by
+// the process_env_conf argument.
+//
+// Arguments:
+// 1. process_env_conf:	The config to apply with uid/gid and CWD.
+//
+// Return value:
+// On success 0 is returned.
+// Otherwise 1 is returned.
+int setup_exec_env(struct app_exec_config *process_env_conf) {
+	int ret = 0;
+
+	ret = setgid(process_env_conf->gid);
+	if (ret < 0) {
+		perror("set GID");
+		return 1;
+	}
+
+	ret = setuid(process_env_conf->uid);
+	if (ret < 0) {
+		// No need for reverting gid, since we will exit.
+		perror("set UID");
+		return 1;
+	}
+
+	ret = chdir(process_env_conf->wdir);
+	if (ret < 0) {
+		// No need for reverting gid/uid, since we will exit.
+		perror("set CWD");
+		return 1;
+	}
+
+	return 0;
 }
 
 int spawn_app(int argc, char *argv[], pid_t *child_pid) {
@@ -666,6 +893,7 @@ int spawn_app(int argc, char *argv[], pid_t *child_pid) {
 		char *path_env = NULL;
 		char *smbios_buf = NULL;
 		char **smbios_envs = NULL;
+		struct app_exec_config *exec_env_conf = NULL;
 		int ret = 0;
 
 		// Put the child in a process group and
@@ -682,7 +910,15 @@ int spawn_app(int argc, char *argv[], pid_t *child_pid) {
 				fprintf(stderr, "Failed to mount special filesystems\n");
 				return 1;
 			} else {
-				smbios_envs = get_env_vars_from_smbios(&path_env, &smbios_buf);
+				smbios_envs = get_config_from_smbios(&path_env, &exec_env_conf, &smbios_buf);
+			}
+		}
+
+		if (exec_env_conf != NULL) {
+			ret = setup_exec_env(exec_env_conf);
+			if (ret != 0) {
+				fprintf(stderr, "Failed to set the process execution environment\n");
+				return ret;
 			}
 		}
 
