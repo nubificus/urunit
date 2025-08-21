@@ -65,6 +65,16 @@
 #define SMBIOS_TABLE_PATH "/sys/firmware/dmi/tables/DMI"
 #define DMI_TYPE_OEM_STRINGS 11
 
+#ifdef DEBUG
+#define SHOW_DEBUG 1
+#else
+#define SHOW_DEBUG 0
+#endif
+
+
+#define DEBUG_PRINT(fmt, ...) \
+	do { if (SHOW_DEBUG) fprintf(stderr, fmt, __VA_ARGS__); } while (0)
+
 struct smbios_header {
 	uint8_t type;
 	uint8_t length;
@@ -500,6 +510,9 @@ char **get_env_vars_from_smbios(char **path_env, char **sbuf) {
 			struct smbios_type11 *type11 = (struct smbios_type11 *)(buf + pos);
 			char *string_area = buf + pos + header->length;
 
+			DEBUG_PRINT("Found DMI Type 11 structure with %d OEM strings:\n",
+					type11->count);
+			DEBUG_PRINT("%s\n", string_area);
 			// Check if the special string "UES" is present
 			if (memcmp(string_area, "UES", 3) == 0) {
 				// Extract the environment variables from the list
@@ -673,6 +686,7 @@ int spawn_app(int argc, char *argv[], pid_t *child_pid) {
 			}
 		}
 
+		DEBUG_PRINT("Executing %s\n", new_argv[0]);
 		ret = manual_execvpe(path_env, new_argv[0], new_argv, smbios_envs);
 		free(smbios_buf);
 		free(smbios_envs);
