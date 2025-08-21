@@ -19,7 +19,10 @@ Building `urunit` is as simple as running `make`, but make sure that `make` and
 a C compiler is installed. In particular:
 
 - `make static`: builds `urunit` as a statically-linked binary
+- `make static_debug`: builds `urunit` as a statically-linked binary enabling debug messages
 - `make dynamic`: builds `urunit` as a dynamically-linked binary
+- `make dynamic_debug`: builds `urunit` as a dynamically-linked binary enabling debug messages
+
 
 > **NOTE**: The default build target is `make static`, hence running `make`
 > will build `urunit` statically.
