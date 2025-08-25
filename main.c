@@ -58,6 +58,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <ctype.h>
 
 #define STATUS_MAX 255
 #define STATUS_MIN 0
@@ -75,9 +76,16 @@
 #define DEBUG_PRINT(fmt, ...) \
 	do { if (SHOW_DEBUG) fprintf(stderr, "[DEBUG] " fmt); } while (0)
 
+struct process_config {
+	uint32_t uid;
+	uint32_t gid;
+	char     *wdir;
+};
+
 struct app_exec_config {
 	char	 **envs;
 	char	 *path_env;
+	struct process_config *pr_conf;
 };
 
 extern char **environ;
@@ -411,6 +419,158 @@ char **parse_envs(char **string_area, size_t max_sz, char **path_env) {
 	return env_vars;
 }
 
+// get_uint_val: Converst the value of "KEY: VALUE" string  to uint32_t
+//
+// Arguments:
+// 1. str:	The string to convert in the form "KEY: VAL"
+// 2. value:	A pointer to uint32_t where the converted value will get stored.
+//
+// Return value:
+// On success 0 is returned and value contains the coverted value.
+// On failure, -1 is returned and value stays intact.
+int get_uint_val(char *str, uint32_t *value) {
+	size_t str_sz = strlen(str);
+	char *val_str = strchr(str, ':');
+	unsigned long val = 0;
+	char *end = NULL;
+
+	if (val_str == NULL) {
+		// We could not find the beginning of the value string.
+		fprintf(stderr, "Failed to find ':' character in %s\n", str);
+		return -1;
+	}
+
+	// strchr will return a pointer to ':', but we need to move passed
+	// ':', hence +1 character.
+	if (val_str + 1 >= str + str_sz) {
+		// We can not go over the string. Something is wrong
+		fprintf(stderr, "Failed to find value after ':' in %s\n", str);
+		return -1;
+	}
+	val_str ++;
+
+	// strtoul can take care of spaces.
+	val = strtoul(val_str, &end, 10);
+	if (errno == ERANGE || val > UINT32_MAX) {
+		perror("Convert string to uint32_t");
+		return -1;
+	}
+	if (*end != '\0') {
+		fprintf(stderr, "Failed to convert %s to unit32_t. Got trailing character %c\n", val_str, *end);
+		return -1;
+	}
+
+	*value = (uint32_t)val;
+
+	return 0;
+}
+
+// get_string_val: Returns the string value of "KEY: VALUE" strings.
+//
+// Arguments:
+// 1. str:	The whole string in the form "KEY: VALUE"
+// 2. value:	A pointer which will point to the beginning of the VALUE
+//
+// Return value:
+// On success 0 is returned and value points to the beginning of VALUE
+// On failure, -1 is returned and value stays intact.
+int get_string_val(char *str, char **value) {
+	size_t str_sz = strlen(str);
+	char *val_str = strchr(str, ':');
+
+	if (val_str == NULL) {
+		// We could not find the beginning of the value string.
+		fprintf(stderr, "Failed to find ':' character in %s\n", str);
+		return -1;
+	}
+
+	// strchr will return a pointer to ':', but we need to move pass this character
+	// and until we find a non-space value.
+	val_str++;
+	while ((val_str < str + str_sz) && *val_str != '\0') {
+		if (!isspace(*val_str)) {
+			*value = val_str;
+
+			return 0;
+		}
+		val_str++;
+	}
+
+	// We can not go over the string. Something is wrong
+	fprintf(stderr, "Failed to find value after ':' in %s\n", str);
+
+	return -1;
+}
+
+// parse_process_config: Parses a list with the following format:
+// UCS
+// UID:<uid>
+// GID:<gid>
+// WD:<working directory>
+// UCE
+// It is important to note, that this function will alter the given list,
+// replacing the new line characters with the end of string '\0' character.
+// The funtion returns a dynamically allocated memory and the caller is
+// responsible to free that memory.
+//
+// Arguments:
+// 1. string_area:	The list with in the aformentioned format.
+//
+// Return value:
+// On success it returns a pointer to a dynamically allocated memory that
+// contains a process_config struct filled with the information
+// from the configuration.
+// Otherwise, NULL is returned
+struct process_config *parse_process_config(char **string_area) {
+	struct process_config *conf = NULL;
+	char *tmp_field = NULL;
+
+	conf = malloc(sizeof(struct process_config));
+	if (!conf) {
+		fprintf(stderr, "Failed to allocate memory for app execution environment config\n");
+		return NULL;
+	}
+	memset(conf, 0, sizeof(struct process_config));
+	conf->wdir = NULL; // Sanity
+
+	tmp_field = strtok(*string_area, "\n");
+	// Discard the first string since it is the special string "UCS"
+	// Also, it is safe to call strtok, even if there was no '\n', since it will
+	// return NULL again.
+	tmp_field = strtok(NULL, "\n");
+	while (tmp_field) {
+		int ret = 0;
+
+		if (memcmp(tmp_field, "UID", 3) == 0) {
+			ret = get_uint_val(tmp_field, &(conf->uid));
+			if (ret != 0) {
+				fprintf(stderr, "Failed to retreive UID information from %s\n", tmp_field);
+				break;
+			}
+		} else 	if (memcmp(tmp_field, "GID", 3) == 0) {
+			ret = get_uint_val(tmp_field, &(conf->gid));
+			if (ret != 0) {
+				fprintf(stderr, "Failed to retreive GID information from %s\n", tmp_field);
+				break;
+			}
+		} else 	if (memcmp(tmp_field, "WD", 2) == 0) {
+			ret = get_string_val(tmp_field, &(conf->wdir));
+			if (ret != 0) {
+				fprintf(stderr, "Failed to retreive WD information from %s\n", tmp_field);
+				break;
+			}
+		} else 	if (memcmp(tmp_field, "UCE", 3) == 0) {
+			*string_area = tmp_field + 4; // 4 bytes for the "UCE" string
+			return conf;
+		}
+
+		tmp_field = strtok(NULL, "\n");
+	}
+
+	free(conf);
+	return NULL;
+}
+
 // get_config_from_file: Reads the contents of <file> argumen and it parses the 
 // app execution configuration and environment variables list.
 // The app execution configuration list starts with the line "UCS" and ends with the
@@ -433,6 +593,7 @@ struct app_exec_config *get_config_from_file(char *file, char **sbuf) {
 	char *buf = NULL;
 	char *path_env = NULL;
 	struct app_exec_config *econf = NULL;
+	struct process_config *pconf = NULL;
 	char *conf_area = NULL;
 
 	buf = read_file_and_size(file, &size);
@@ -442,6 +603,7 @@ struct app_exec_config *get_config_from_file(char *file, char **sbuf) {
 	}
 	conf_area = buf;
 
+	DEBUG_PRINT("Checking for environment variables list\n");
 	// Check if the special string "UES" is present
 	// which means that now starts the environment variable
 	// list.
@@ -462,6 +624,27 @@ struct app_exec_config *get_config_from_file(char *file, char **sbuf) {
 		}
 	}
 
+	DEBUG_PRINT("Checking for execution environment configuration\n");
+	// Check if the special string "UCS" is present
+	// which means that now starts the configuration for the application
+	// execution environment
+	if (memcmp(conf_area, "UCS", 3) == 0) {
+		char *init_conf_area = conf_area;
+		// Extract the environment variables from the list
+		pconf = parse_process_config(&conf_area);
+		if (!pconf ) {
+			fprintf(stderr, "Warning: No configuration for the application execution environment was found\n");
+		}
+		// If the list was properly formatted, ending with "UCE"
+		// then string_area should differ from init_string_area
+		// Otherwise, the list was not properly formatted and
+		// we abort the parsing.
+		if (conf_area == init_conf_area) {
+			fprintf(stderr, "Invalid format of application execution environment configuration\n");
+			goto get_env_vars_error_free;
+		}
+	}
+
 	econf = malloc(sizeof(struct app_exec_config));
 	if (!econf) {
 		fprintf(stderr, "Could not allocate memory for app exec config struct\n");
@@ -471,6 +654,7 @@ struct app_exec_config *get_config_from_file(char *file, char **sbuf) {
 	*sbuf = buf;
 	econf->envs = env_vars;
 	econf->path_env = path_env;
+	econf->pr_conf = pconf;
 	return econf;
 
 get_env_vars_error_free:
@@ -621,10 +805,53 @@ manual_exec_exit:
 	return status;
 }
 
+// setup_exec_env: Sets up the process execution environment as defined by
+// the process_conf argument.
+//
+// Arguments:
+// 1. process_conf:	The config to apply with uid/gid and CWD.
+//
+// Return value:
+// On success 0 is returned.
+// Otherwise 1 is returned.
+int setup_exec_env(struct process_config *process_conf) {
+	int ret = 0;
+
+	if (!process_conf) {
+		DEBUG_PRINT("Empty config, nothing to be done\n");
+		return 0;
+	}
+
+	DEBUG_PRINTF("Setting gid to %d\n", process_conf->gid);
+	ret = setgid(process_conf->gid);
+	if (ret < 0) {
+		perror("set GID");
+		return 1;
+	}
+
+	DEBUG_PRINTF("Setting uid to %d\n", process_conf->uid);
+	ret = setuid(process_conf->uid);
+	if (ret < 0) {
+		// No need for reverting gid, since we will exit.
+		perror("set UID");
+		return 1;
+	}
+
+	DEBUG_PRINTF("Switching to directory %s\n", process_conf->wdir);
+	ret = chdir(process_conf->wdir);
+	if (ret < 0) {
+		// No need for reverting gid/uid, since we will exit.
+		perror("set CWD");
+		return 1;
+	}
+
+	return 0;
+}
+
 int child_func(char *argv[]) {
 	char *config_file = NULL;
 	char *config_buf = NULL;
-	struct app_exec_config *app_envs = NULL;
+	struct app_exec_config *app_config = NULL;
 	int ret = 0;
 
 	DEBUG_PRINT("Isolating child\n");
@@ -643,17 +870,25 @@ int child_func(char *argv[]) {
 			fprintf(stderr, "Failed to mount special filesystems\n");
 			return 1;
 		}
-		app_envs = get_config_from_file(config_file, &config_buf);
+		app_config = get_config_from_file(config_file, &config_buf);
 	}
-	if (app_envs) {
-		ret = manual_execvpe(app_envs->path_env, argv[0], argv, app_envs->envs);
+	if (app_config) {
+		ret = setup_exec_env(app_config->pr_conf);
+		if (ret != 0) {
+			fprintf(stderr, "Failed to set up the process execution environment\n");
+			goto child_func_free;
+		}
+		ret = manual_execvpe(app_config->path_env, argv[0], argv, app_config->envs);
 	} else {
+		DEBUG_PRINT("No configuration, simply execvp\n");
 		ret = manual_execvpe(NULL, argv[0], argv, NULL);
 	}
 	// If we returned something went wrong
+child_func_free:
 	free(config_buf);
-	free(app_envs->envs);
-	free(app_envs);
+	free(app_config->envs);
+	free(app_config->pr_conf);
+	free(app_config);
 
 	return ret;
 }
