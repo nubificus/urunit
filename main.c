@@ -357,6 +357,8 @@ size_t measure_tokens(char *str_buf, size_t max_size, char tok) {
 // will point to the beginning of that string inside the list.
 char **parse_envs(char **string_area, size_t max_sz, char **path_env) {
 	size_t total_envs = 0;
+	// TODO: We might need to retrun a list here with the first
+	// element being NULL instead of returning NULL
 	char **env_vars = NULL;
 	uint8_t path_found = 0;
 	char *tmp_env = NULL;
@@ -413,7 +415,7 @@ char **parse_envs(char **string_area, size_t max_sz, char **path_env) {
 		free(env_vars);
 		return NULL;
 	}
-	// Add nULL to indicate the end of the table with environment variables.
+	// Add NULL to indicate the end of the table with environment variables.
 	env_vars[i] = NULL;
 
 	return env_vars;
@@ -515,13 +517,14 @@ int get_string_val(char *str, char **value) {
 //
 // Arguments:
 // 1. string_area:	The list with in the aformentioned format.
+// 2. max_sz:		The max possible size of the list.
 //
 // Return value:
 // On success it returns a pointer to a dynamically allocated memory that
 // contains a process_config struct filled with the information
 // from the configuration.
 // Otherwise, NULL is returned
-struct process_config *parse_process_config(char **string_area) {
+struct process_config *parse_process_config(char **string_area, size_t max_sz) {
 	struct process_config *conf = NULL;
 	char *tmp_field = NULL;
 
@@ -538,7 +541,7 @@ struct process_config *parse_process_config(char **string_area) {
 	// Also, it is safe to call strtok, even if there was no '\n', since it will
 	// return NULL again.
 	tmp_field = strtok(NULL, "\n");
-	while (tmp_field) {
+	while (tmp_field && ((size_t)(tmp_field - *string_area) < max_sz)) {
 		int ret = 0;
 
 		if (memcmp(tmp_field, "UID", 3) == 0) {
@@ -622,6 +625,9 @@ struct app_exec_config *get_config_from_file(char *file, char **sbuf) {
 			fprintf(stderr, "Invalid format of environment variable list. \"UEE\" was not found\n");
 			goto get_env_vars_error_free;
 		}
+		// Reduce the size of the config by the bytes parsed
+		// for the environment variables list.
+		size -= conf_area - init_conf_area;
 	}
 
 	DEBUG_PRINT("Checking for execution environment configuration\n");
@@ -631,7 +637,7 @@ struct app_exec_config *get_config_from_file(char *file, char **sbuf) {
 	if (memcmp(conf_area, "UCS", 3) == 0) {
 		char *init_conf_area = conf_area;
 		// Extract the environment variables from the list
-		pconf = parse_process_config(&conf_area);
+		pconf = parse_process_config(&conf_area, size);
 		if (!pconf ) {
 			fprintf(stderr, "Warning: No configuration for the application execution environment was found\n");
 		}
