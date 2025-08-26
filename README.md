@@ -9,9 +9,13 @@ to the target application.
 
 The key features of `urunit` are:
 
-- Parsing and grouping multi-word arguments from Linux kernel boot parameters
-- Launching and waiting for the target application until it terminates
-- Reaping all zombie processes
+- Parsing and grouping multi-word arguments from Linux kernel boot parameters.
+- Launching and waiting for the target application until it terminates.
+- Reaping all zombie processes.
+- Setting the default route to eth0, if `URUNIT_DEFROUTE` environment variable
+  is set.
+- Reading and setting the environment variables for an application from a file.
+- Reading and setting the execution environment configuration for a process from a file.
 
 ## Building
 
@@ -56,6 +60,31 @@ urunit echo `hello world`
 ```
 
 will result in `echo` receiving a single argument: `hello world`.
+
+### Urunit configuration file
+
+In order to configure the execution environment for an application, `urunit`
+accepts a specific configuration file. The configuration file can contain the
+following information:
+
+- The list of the environment variables to set for the application
+- The configuration for the process configuration.
+
+The file can be specified to `urunit` setting the `URUNIT_CONFIG`
+environment variable with the path to the configuration file.
+
+The supported format of the configuration file is the following:
+
+```
+UES
+/* list of environment variables */
+UEE
+UCS
+UID: <uid_for_the_application>
+GID: <gid_for_the_application>
+WD:  <working_directory>
+UCE
+```
 
 ## Installation
 
