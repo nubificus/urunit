@@ -82,10 +82,16 @@ struct process_config {
 	char     *wdir;
 };
 
+struct block_config {
+	char *id;
+	char *mountpoint;
+};
+
 struct app_exec_config {
 	char	 **envs;
 	char	 *path_env;
 	struct process_config *pr_conf;
+	struct block_config **blk_conf;
 };
 
 extern char **environ;
@@ -574,6 +580,131 @@ struct process_config *parse_process_config(char **string_area, size_t max_sz) {
 	return NULL;
 }
 
+// parse_block_config Parses a list with the following format:
+// UBS
+// ID: <serial_id>
+// MP: <mount_point>
+// ...
+// UBE
+// It is important to note, that this function will alter the given list,
+// replacing the new line characters with the end of string '\0' character.
+// The funtion returns a dynamically allocated memory and the caller is
+// responsible to free that memory.
+//
+// Arguments:
+// 1. string_area:	The list with the aformentioned format.
+// 2. max_sz:		The maximum size of the area to look for block config
+//
+// Return value:
+// On success it returns an array of block_config structs filled with the information
+// from the list.
+// Otherwise, NULL is returned
+struct block_config **parse_block_config(char **string_area, size_t max_sz) {
+	// TODO: We might need to retrun a list here with the first
+	// element being NULL instead of returning NULL
+	struct block_config **bentries = NULL;
+	char *tmp_field = NULL;
+	size_t i = 0;
+	size_t total_entries = 0;
+
+	// Count the new line characters we have in the list.
+	// Since every block entry consist of 2 fields, the total number
+	// of entries derives from diving the number of new lines by 2.
+	total_entries = measure_tokens(*string_area, max_sz, '\n') / 2;
+	// If the list is correctly formatted it will start with "UBS"
+	// and end with "UBE". These special strings will not be stored,
+	// but they add up in the overall size, since they occupy one line each.
+	// However, we can use this extra entry in the array to mark the end of
+	// the array with NULL.
+	bentries = malloc(total_entries * sizeof(struct block_config *));
+	if (!bentries) {
+		fprintf(stderr, "Failed to allocate memory for block entries\n");
+		return NULL;
+	}
+	if (total_entries > 0)
+		bentries[0] = NULL;
+	DEBUG_PRINTF("Found %ld block entries\n", total_entries);
+
+	tmp_field = strtok(*string_area, "\n");
+	// Discard the first string since it is the special string "UBS"
+	// Also, it is safe to call strtok, even if there was no '\n', since it will
+	// return NULL again.
+	tmp_field = strtok(NULL, "\n");
+	while (tmp_field && i < total_entries) {
+		int ret = 0;
+
+		// The first string should be "ID:"
+		if (memcmp(tmp_field, "ID:", 3) == 0) {
+			// If bentries[i] is not NULL then we never reached found
+			// MP entry in the config for this ID.
+			if (bentries[i]) {
+				fprintf(stderr, "Multiple ID entries without MP\n");
+				goto parse_block_config_free;
+			}
+			bentries[i] = malloc(sizeof(struct block_config));
+			if (!bentries[i]) {
+				fprintf(stderr, "Failed to allocate memory for a block entry\n");
+				goto parse_block_config_free;
+			}
+			bentries[i]->id = NULL;
+			bentries[i]->mountpoint = NULL;
+
+			ret = get_string_val(tmp_field, &(bentries[i]->id));
+			if (ret != 0) {
+				fprintf(stderr, "Failed to retrieve block ID from %s\n", tmp_field);
+				free(bentries[i]);
+				goto parse_block_config_free;
+			}
+			DEBUG_PRINTF("Found block entry with ID %s\n", bentries[i]->id);
+		} else if (memcmp(tmp_field, "MP:", 3) == 0) {
+			ret = get_string_val(tmp_field, &(bentries[i]->mountpoint));
+			if (ret != 0) {
+				fprintf(stderr, "Failed to retrieve block mountpoint from %s\n", tmp_field);
+				// Remove the current entry
+				// because it was not properly formatted.
+				free(bentries[i]);
+				goto parse_block_config_free;
+			}
+			DEBUG_PRINTF("Found block entry with MP %s\n", bentries[i]->mountpoint);
+			i++;
+			bentries[i] = NULL;
+		} else 	if (memcmp(tmp_field, "UBE", 3) == 0) {
+			// 4 bytes for the "UBE" string
+			*string_area = tmp_field + 4;
+			break;
+		}
+		tmp_field = strtok(NULL, "\n");
+	}
+
+	// Special case where malloc did not return NULL with 0 size,
+	// or none properly formatted block entries were found
+	// Both cases mean that we have no block entries and hence
+	// we should return NULL.
+	if (i == 0) {
+		// free is safe here, since bentries come from malloc and
+		// contains either NULL or an address. Both cases are fine for free.
+		free(bentries);
+		return NULL;
+	}
+	// In case of a malformed block config where we had an ID but no MP,
+	// then mountpoint will be NULL and we should free the allocated entry.
+	if (bentries[i] && !(bentries[i]->mountpoint)) {
+		free(bentries[i]);
+	}
+	// Add NULL to indicate the end of the table with block entries
+	bentries[i] = NULL;
+
+	return bentries;
+
+parse_block_config_free:
+	for (size_t j = 0; j < i; j++) {
+		free(bentries[j]);
+	}
+	free(bentries);
+
+	return NULL;
+}
+
 // get_config_from_file: Reads the contents of <file> argumen and it parses the 
 // app execution configuration and environment variables list.
 // The app execution configuration list starts with the line "UCS" and ends with the
@@ -597,6 +728,7 @@ struct app_exec_config *get_config_from_file(char *file, char **sbuf) {
 	char *path_env = NULL;
 	struct app_exec_config *econf = NULL;
 	struct process_config *pconf = NULL;
+	struct block_config **bconf = NULL;
 	char *conf_area = NULL;
 
 	buf = read_file_and_size(file, &size);
@@ -649,6 +781,30 @@ struct app_exec_config *get_config_from_file(char *file, char **sbuf) {
 			fprintf(stderr, "Invalid format of application execution environment configuration\n");
 			goto get_env_vars_error_free;
 		}
+		// Reduce the size of the config by the bytes parsed
+		// for the environment variables list.
+		size -= conf_area - init_conf_area;
+	}
+
+	DEBUG_PRINT("Checking for block volumes mount configuration\n");
+	// Check if the special string "UBS" is present
+	// which means that now starts the configuration for the block mounts
+	if (memcmp(conf_area, "UBS", 3) == 0) {
+		char *init_conf_area = conf_area;
+		// Extract the block configuration
+		bconf = parse_block_config(&conf_area, size);
+		if (!bconf ) {
+			fprintf(stderr, "Warning: No configuration for block mounts\n");
+		}
+		// If the list was properly formatted, ending with "UBE"
+		// then conf_area should differ from init_conf_area
+		// Otherwise, the list was not properly formatted and
+		// we abort the parsing.
+		if (conf_area == init_conf_area) {
+			fprintf(stderr, "Invalid format of block volume mounts\n");
+			goto get_env_vars_error_free;
+		}
+		size -= conf_area - init_conf_area;
 	}
 
 	econf = malloc(sizeof(struct app_exec_config));
@@ -661,6 +817,7 @@ struct app_exec_config *get_config_from_file(char *file, char **sbuf) {
 	econf->envs = env_vars;
 	econf->path_env = path_env;
 	econf->pr_conf = pconf;
+	econf->blk_conf = bconf;
 	return econf;
 
 get_env_vars_error_free:
