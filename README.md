@@ -16,6 +16,7 @@ The key features of `urunit` are:
   is set.
 - Reading and setting the environment variables for an application from a file.
 - Reading and setting the execution environment configuration for a process from a file.
+- Reading and mounting attached block devices defined in the configuration file.
 
 ## Building
 
@@ -68,7 +69,9 @@ accepts a specific configuration file. The configuration file can contain the
 following information:
 
 - The list of the environment variables to set for the application
-- The configuration for the process configuration.
+- The configuration for the process execution environment.
+- The list of mounts of block devices. Each block device is defined by its
+  serial id and it will get mounted in the defined mountpoint.
 
 The file can be specified to `urunit` setting the `URUNIT_CONFIG`
 environment variable with the path to the configuration file.
@@ -84,6 +87,11 @@ UID: <uid_for_the_application>
 GID: <gid_for_the_application>
 WD:  <working_directory>
 UCE
+UBS
+ID: <serial_id>
+MP: <mountpoint>
+...
+UBE
 ```
 
 ## Installation
