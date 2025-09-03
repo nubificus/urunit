@@ -253,8 +253,7 @@ int reap(const pid_t child_pid, int *child_exitcode_ptr) {
 	int reaped_status = 0;
 
 	while (1) {
-		reaped_pid = waitpid(-1, &reaped_status, WNOHANG);
-
+		reaped_pid = waitpid(-1, &reaped_status, 0);
 		switch (reaped_pid) {
 		case -1:
 			if (errno == ECHILD) {
