@@ -52,6 +52,7 @@
 #include <linux/route.h>
 #include <netinet/in.h>
 
+#include <dirent.h>
 #include <errno.h>
 #include <string.h>
 #include <stdio.h>
@@ -80,6 +81,11 @@ struct app_exec_config {
 	uint32_t uid;
 	uint32_t gid;
 	char	 *wdir;
+};
+
+struct block_config {
+	char *id;
+	char *mountpoint;
 };
 
 struct smbios_header {
@@ -567,7 +573,7 @@ int get_string_val(char *str, char **value) {
 // On success it returns a app_exec_config struct filled with the information
 // from the list.
 // Otherwise, NULL is returned
-struct app_exec_config *parse_app_exec_config(char *string_area) {
+struct app_exec_config *parse_app_exec_config(char **string_area) {
 	struct app_exec_config *conf = NULL;
 	char *tmp_field = NULL;
 
@@ -579,7 +585,7 @@ struct app_exec_config *parse_app_exec_config(char *string_area) {
 	memset(conf, 0, sizeof(struct app_exec_config));
 	conf->wdir = NULL; // Sanity
 
-	tmp_field = strtok(string_area, "\n");
+	tmp_field = strtok(*string_area, "\n");
 	// Discard the first string since it is the special string "UCS"
 	// Also, it is safe to call strtok, even if there was no '\n', since it will
 	// return NULL again.
@@ -608,6 +614,7 @@ struct app_exec_config *parse_app_exec_config(char *string_area) {
 				break;
 			}
 		} else 	if (memcmp(tmp_field, "UCE", 3) == 0) {
+			*string_area = tmp_field + 4; // 4 bytes for the "UCE" string
 			return conf;
 		}
 
@@ -615,6 +622,108 @@ struct app_exec_config *parse_app_exec_config(char *string_area) {
 	}
 
 	free(conf);
+	return NULL;
+}
+
+// parse_block_config Parses a list with the following format:
+// UBS
+// ID: uid
+// MP: gid
+// ...
+// UBE
+// It is important to note, that this function will alter the given list,
+// replacing the new line characters with the end of string '\0' character.
+// The funtion returns a dynamically allocated memory and the caller is
+// responsible to free that memory.
+//
+// Arguments:
+// 1. string_area:	The list with in the aformentioned format.
+// 2. max_sz	:	The maximum size of the area to look for block config
+//
+// Return value:
+// On success it returns an array of block_config structs filled with the information
+// from the list.
+// Otherwise, NULL is returned
+struct block_config **parse_block_config(char *string_area, size_t max_sz) {
+	struct block_config **bentries = NULL;
+	char *tmp_field = NULL;
+	size_t i = 0;
+	size_t total_entries = 0;
+
+	// Search how many new line characters we have in the list.
+	// Then to get the total block entries divide it by two, since
+	// each entry has two fields
+	total_entries = measure_tokens(string_area, max_sz, '\n') / 2;
+	// If the list is correctly formatted it will start with "UBS"
+	// which will not be stored and therefore, we can use this extra
+	// pointer for the end of the table (NULL)
+	// NOTE: If the list contains "UBE", we allocate one more pointer that
+	// is never used.
+	bentries = malloc(total_entries * sizeof(struct block_config *));
+	if (!bentries) {
+		fprintf(stderr, "Failed to allocate memory for block entries\n");
+		return NULL;
+	}
+
+	tmp_field = strtok(string_area, "\n");
+	// Discard the first string since it is the special string "UBS"
+	// Also, it is safe to call strtok, even if there was no '\n', since it will
+	// return NULL again.
+	tmp_field = strtok(NULL, "\n");
+	while (tmp_field && i < total_entries) {
+		int ret = 0;
+
+		// The first string should be "ID:"
+		if (memcmp(tmp_field, "ID:", 3) == 0) {
+			bentries[i] = malloc(sizeof(struct block_config));
+			if (!bentries[i]) {
+				fprintf(stderr, "Failed to allocate memory for a block entry\n");
+				goto parse_block_config_free;
+				return NULL;
+			}
+
+			ret = get_string_val(tmp_field, &(bentries[i]->id));
+			if (ret != 0) {
+				fprintf(stderr, "Failed to retreive block ID from %s\n", tmp_field);
+				break;
+			}
+		} else 	if (memcmp(tmp_field, "MP:", 3) == 0) {
+			ret = get_string_val(tmp_field, &(bentries[i]->mountpoint));
+			if (ret != 0) {
+				fprintf(stderr, "Failed to retreive block mountpoint from %s\n", tmp_field);
+				// Remove the previous allocated entry
+				// because it was not properly formatted.
+				free(bentries[i]);
+				break;
+			}
+			i++;
+		} else 	if (memcmp(tmp_field, "UBE", 3) == 0) {
+			break;
+		}
+		tmp_field = strtok(NULL, "\n");
+	}
+
+	// Special case where malloc did not return NULL with 0 size,
+	// or no strings with '\n' found after the first occurance of '\n'.
+	// Both cases mean that we have no block entries and hence
+	// we should return NULL.
+	if (i == 0) {
+		// free is safe here, since env_vars come from malloc and
+		// contains either NULL or address. Both cases are fine for free.
+		free(bentries);
+		return NULL;
+	}
+	// Add nULL to indicate the end of the table with environment variables.
+	bentries[i] = NULL;
+
+	return bentries;
+
+parse_block_config_free:
+	for (size_t j = 0; j < i; j++) {
+		free(bentries[j]);
+	}
+	free(bentries);
+
 	return NULL;
 }
 
@@ -628,9 +737,11 @@ struct app_exec_config *parse_app_exec_config(char *string_area) {
 // Arguments:
 // 1. path_env:	A pointer to store the location of PATH environment variables
 //		inside the list, if the environment variable is found.
-// 2. exec_conf:THis is the pointer wchi will contain the config for the process
+// 2. exec_conf:This is the pointer which will contain the config for the process
 //		execution environment after parsing the respective data.
-// 3. sbuf:	A pointer to the memory that was allocated to store the contents
+// 3. block_conf:This is the pointer which will contain The array of block_config
+//		entries after parsing the respective data.
+// 4. sbuf:	A pointer to the memory that was allocated to store the contents
 //		of the smbios file. Just return it to free it, if something goes wrong.
 //
 // Return value:
@@ -638,7 +749,7 @@ struct app_exec_config *parse_app_exec_config(char *string_area) {
 // and able to be used for execve and friends. Furthermore, if PATH environment
 // variable is found, the path_env will point to the respective location.
 // On failure, it return NULL.
-char **get_config_from_smbios(char **path_env, struct app_exec_config **exec_conf, char **sbuf) {
+char **get_config_from_smbios(char **path_env, struct app_exec_config **exec_conf, struct block_config ***bc, char **sbuf) {
 	char **env_vars = NULL;
 	FILE *fp = NULL;
 	struct stat st = { 0 };
@@ -646,6 +757,7 @@ char **get_config_from_smbios(char **path_env, struct app_exec_config **exec_con
 	char *buf = NULL;
 	size_t pos = 0;
 	struct app_exec_config *econf = NULL;
+	struct block_config **blk_conf = NULL;
 
 	fp = fopen(SMBIOS_TABLE_PATH, "rb");
 	if (!fp) {
@@ -701,15 +813,34 @@ char **get_config_from_smbios(char **path_env, struct app_exec_config **exec_con
 					goto get_env_vars_error_free;
 				}
 
+				init_string_area = string_area;
 				if (memcmp(string_area, "UCS", 3) == 0) {
 					// Extract the environment variables from the list
-					econf = parse_app_exec_config(string_area);
+					econf = parse_app_exec_config(&string_area);
 					if (!econf) {
 						// We did not find the "UCE" string
 						// but we have the environment variables
 						fprintf(stderr, "Warning: No app execution environment config found\n");
 					} else {
 						*exec_conf = econf;
+					}
+				}
+
+				if (init_string_area == string_area) {
+					// We did not find the "UEE" string
+					// However, the memory has been already freed
+					goto get_env_vars_error_free;
+				}
+				if (memcmp(string_area, "UBS", 3) == 0) {
+					// Extract the block configuration
+					blk_conf = parse_block_config(string_area, st.st_size);
+					if (!blk_conf) {
+						// We did not find the "UBE" string
+						// but we have the environment variables
+						// and app execution configuration
+						fprintf(stderr, "Warning: No mount config found\n");
+					} else {
+						*bc = blk_conf;
 					}
 				}
 
@@ -778,6 +909,82 @@ int setup_exec_env(struct app_exec_config *process_env_conf) {
 		return 1;
 	}
 
+	return 0;
+}
+
+// mount_block_vols:	Searches all block devices and finds the one that match
+// the seria
+//
+// Arguments:
+// 1. vols:	An array of struct block_config with information to mount
+//		block volumes
+//
+// Return value:
+// On success 0 is returned.
+// Otherwise 1 is returned.
+// TODO: Rewrite everything
+int mount_block_vols(struct block_config **vols) {
+	struct dirent *de;
+	DIR *d = NULL;
+
+	d = opendir("/sys/block");
+	if (!d) {
+		perror("opendir /sys/block");
+		return 1;
+	}
+
+	de = readdir(d);
+	while (de) {
+		char serial_path[PATH_MAX];
+		FILE *f = NULL;
+		char serial[PATH_MAX];
+		struct block_config **tmp_bc = vols;
+
+		if (de->d_name[0] == '.') {
+			de = readdir(d);
+			continue;
+		}
+
+		snprintf(serial_path, sizeof(serial_path),
+				"/sys/block/%s/serial", de->d_name);
+		f = fopen(serial_path, "r");
+		if (!f) {
+			perror("fopen");
+			de = readdir(d);
+			continue;
+		}
+
+		if (fgets(serial, sizeof(serial), f)) {
+			serial[strcspn(serial, "\n")] = '\0';
+		}
+
+		fclose(f);
+
+		while (*tmp_bc != NULL) {
+			printf("found %s expect %s\n", serial, (*tmp_bc)->id);
+			if (strcmp(serial, (*tmp_bc)->id) == 0) {
+				char devnode[PATH_MAX];
+				snprintf(devnode, sizeof(devnode), "/dev/%s", de->d_name);
+
+				// TODO: should be replaced by something similar
+				// to mkdirAll
+				if (mkdir((*tmp_bc)->mountpoint, 0755) != 0 && errno != EEXIST) {
+					perror("mkdir");
+					break;
+				}
+				if (mount(devnode, (*tmp_bc)->mountpoint, "ext4", 0, "") != 0) {
+					fprintf(stderr, "Failed to mount %s at %s: %s\n",
+							devnode, (*tmp_bc)->mountpoint, strerror(errno));
+				}
+				break;
+			}
+
+			tmp_bc++;
+		}
+		de = readdir(d);
+	}
+
+	closedir(d);
 	return 0;
 }
 
@@ -893,6 +1100,7 @@ int spawn_app(int argc, char *argv[], pid_t *child_pid) {
 		char *path_env = NULL;
 		char *smbios_buf = NULL;
 		char **smbios_envs = NULL;
+		struct block_config **block_conf = NULL;
 		struct app_exec_config *exec_env_conf = NULL;
 		int ret = 0;
 
@@ -910,7 +1118,15 @@ int spawn_app(int argc, char *argv[], pid_t *child_pid) {
 				fprintf(stderr, "Failed to mount special filesystems\n");
 				return 1;
 			} else {
-				smbios_envs = get_config_from_smbios(&path_env, &exec_env_conf, &smbios_buf);
+				smbios_envs = get_config_from_smbios(&path_env, &exec_env_conf, &block_conf, &smbios_buf);
+			}
+		}
+
+		if (block_conf != NULL) {
+			ret = mount_block_vols(block_conf);
+			if (ret != 0) {
+				fprintf(stderr, "Failed to set the process execution environment\n");
+				return ret;
 			}
 		}
 
