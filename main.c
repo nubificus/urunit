@@ -49,6 +49,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/mount.h>
+#include <sys/resource.h>
 #include <linux/route.h>
 #include <netinet/in.h>
 
@@ -877,6 +878,43 @@ get_env_vars_error:
 	return NULL;
 }
 
+int setup_max_map() {
+    FILE *fp = fopen("/proc/sys/vm/max_map_count", "w");
+    if (!fp) {
+        perror("fopen");
+        return 1;
+    }
+
+    if (fprintf(fp, "%d\n", 262144) < 0) {
+        perror("fprintf");
+        fclose(fp);
+        return 1;
+    }
+
+    fclose(fp);
+    printf("vm.max_map_count set to 262144\n");
+    return 0;
+}
+
+int setup_ulimit() {
+    struct rlimit rl;
+
+    // Get current limits
+    if (getrlimit(RLIMIT_NOFILE, &rl) != 0) {
+        perror("getrlimit");
+        return 1;
+    }
+
+    // Set new limits
+    rl.rlim_cur = 65535; // soft limit
+    rl.rlim_max = 65535; // hard limit
+    if (setrlimit(RLIMIT_NOFILE, &rl) != 0) {
+        perror("setrlimit");
+        return 1;
+    }
+    return 0;
+}
+
 // setup_exec_env: Sets up the process execution environment as defined by
 // the process_env_conf argument.
 //
@@ -888,6 +926,20 @@ get_env_vars_error:
 // Otherwise 1 is returned.
 int setup_exec_env(struct app_exec_config *process_env_conf) {
 	int ret = 0;
+
+	// TODO: Properly implement this with values from container's config
+	
+	ret = setup_ulimit();
+	if (ret < 0) {
+		perror("set ulimit");
+		return 1;
+	}
+
+	ret = setup_max_map();
+	if (ret < 0) {
+		perror("set max map");
+		return 1;
+	}
 
 	ret = setgid(process_env_conf->gid);
 	if (ret < 0) {
