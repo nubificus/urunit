@@ -52,6 +52,7 @@
 #include <linux/route.h>
 #include <netinet/in.h>
 
+#include <dirent.h>
 #include <errno.h>
 #include <string.h>
 #include <stdio.h>
@@ -63,6 +64,7 @@
 #define STATUS_MAX 255
 #define STATUS_MIN 0
 #define ETH0_IF "eth0"
+#define SERIAL_MAX_SZ 10
 
 #ifdef DEBUG
 #define SHOW_DEBUG 1
@@ -1011,6 +1013,365 @@ int setup_exec_env(struct process_config *process_conf) {
 	return 0;
 }
 
+// rm_empty_dirs: Removes the directory dir given as argument and all empty parent
+// directories up to and including top_dir.
+//
+// Arguments:
+// 1. dir:	The directory to remove. 
+// 2. top_dir:	The top-most directory to remove. It should not end in '/'
+//
+// Return value:
+// On success 0 is returned.
+// Otherwise -1 is returned.
+int rm_empty_dirs(const char *dir, const char *top_dir) {
+	char current[PATH_MAX] = { 0 };
+	int ret = 0;
+
+	ret = snprintf(current, sizeof(current), "%s", dir);
+	if (ret <= 0 || (size_t)ret > sizeof(current)) {
+		fprintf(stderr, "Could not copy %s\n", dir);
+		return -1;
+	}
+	// Make sure the path does not end in '/'
+	if (current[ret - 1] == '/') {
+		current[ret - 1] = '\0';
+	}
+
+	DEBUG_PRINTF("Top most directory to remove: %s\n", top_dir);
+	while (strcmp(current, top_dir) != 0) {
+		char *last_slash = NULL;
+
+		// Stop at root or common mount points
+		if (strcmp(current, "/") == 0 ||
+		    strcmp(current, "/mnt") == 0 ||
+		    strcmp(current, "/var") == 0 ||
+		    strcmp(current, "/home") == 0 ||
+		    strcmp(current, "/tmp") == 0) {
+			break;
+		}
+
+		DEBUG_PRINTF("Trying to remove directory: %s\n", current);
+		ret = rmdir(current);
+		if (ret != 0) {
+			perror("rmdir");
+			return -1;
+		}
+		DEBUG_PRINTF("Removed empty directory: %s\n", current);
+
+		// Get parent directory
+		last_slash = strrchr(current, '/');
+		if (!last_slash || last_slash == current) {
+			fprintf(stderr, "Could not get parent directory of %s\n", current);
+			return -1;
+		}
+		*last_slash = '\0';
+	}
+
+	DEBUG_PRINTF("Trying to remove directory: %s\n", current);
+	// Remove also top most directory
+	ret = rmdir(current);
+	if (ret != 0) {
+		perror("rmdir");
+		return -1;
+	}
+	DEBUG_PRINTF("Removed empty directory: %s\n", current);
+
+	return 0;
+}
+
+// mkdir_all: Creates a directory path including all non-existing parent directories.
+// Similar to MkdirAll in Go and "mkdir -p" command.
+//
+// Arguments:
+// 1. path:	The full path of the directory to create
+// 2. mode:	The permissions mode for the new directories
+//
+// Return value:
+// On success 0 is returned.
+// Otherwise -1 is returned.
+int mkdir_all(const char *path, mode_t mode, char *first_dir) {
+	char tmp_path[PATH_MAX] = { 0 };
+	char *next_slash = NULL;
+	int ret = 0;
+	struct stat st;
+	uint8_t is_first = 1;
+	size_t or_path_len = 0;
+	size_t tmp_len = 0;
+
+	if (path == NULL || *path == '\0') {
+		fprintf(stderr, "Invalid path value\n");
+		return -1;
+	}
+
+	if (strcmp(path, "/") == 0) {
+		fprintf(stderr, "Invalid path value: %s\n", path);
+		return -1;
+	}
+
+	// Check if path already exists
+	if (stat(path, &st) == 0) {
+		if (S_ISDIR(st.st_mode)) {
+			return 0;
+		} else {
+			fprintf(stderr, "%s exists and is not a directory\n", path);
+			return -1;
+		}
+	}
+
+	ret = snprintf(tmp_path, sizeof(tmp_path), "%s", path);
+	if (ret <= 0 || (size_t)ret > sizeof(tmp_path)) {
+		fprintf(stderr, "Could not create a copy of %s\n", path);
+		return -1;
+	}
+
+	or_path_len = strlen(tmp_path);
+	tmp_len = or_path_len;
+	// Remove trailing slashes
+	while (tmp_len > 1 && tmp_path[tmp_len - 1] == '/') {
+		tmp_path[tmp_len - 1] = '\0';
+		tmp_len--;
+	}
+	// We will need to copy tmp_path later so we need to include
+	// the end of string character.
+	or_path_len++;
+
+	// Iterate through the path and create directories
+	next_slash = strchr(tmp_path + 1, '/');
+	while(next_slash) {
+		*next_slash = '\0'; // Temporarily truncate
+
+		// Try to create the directory
+		DEBUG_PRINTF("Trying to create dir %s\n", tmp_path);
+		ret = mkdir(tmp_path, mode);
+		if (ret != 0 && errno != EEXIST) {
+			fprintf(stderr, "Could not create directory %s\n", tmp_path);
+			perror("mkdir");
+			ret = -1;
+			goto mkdir_all_cleanup;
+		}
+		if (ret == 0 && is_first) {
+			ret = snprintf(first_dir, or_path_len, "%s", tmp_path);
+			if (ret < 0 || (size_t)ret > or_path_len) {
+				fprintf(stderr, "Could not copy first created path %s", tmp_path);
+				return -1;
+			}
+			is_first = 0;
+		}
+		*next_slash = '/'; // Restore the slash
+		next_slash = strchr(next_slash + 1, '/');
+	}
+
+	// Create the final directory
+	DEBUG_PRINTF("Trying to create dir %s\n", tmp_path);
+	ret = mkdir(tmp_path, mode);
+	if (ret != 0 && errno != EEXIST) {
+		fprintf(stderr, "Could not create directory %s\n", tmp_path);
+		perror("mkdir");
+		ret = -1;
+		goto mkdir_all_cleanup;
+	}
+	if (ret == 0 && is_first) {
+		ret = snprintf(first_dir, or_path_len, "%s", tmp_path);
+		if (ret < 0 || (size_t)ret > or_path_len) {
+			fprintf(stderr, "Could not copy first created directory %s\n", tmp_path);
+			return -1;
+		}
+	}
+	DEBUG_PRINTF("Top most created dir %s\n", first_dir);
+	return 0;
+
+mkdir_all_cleanup:
+	// If we have not created any directory yet then is_first will be 1
+	// and hence we do not have to remove any directory.
+	if (!is_first) {
+		int ret = 0;
+		// However, the fail took place for the tmp_path directory
+		// which was not created and hence we do not have to remove it.
+		// Therefore, move to the parent directory.
+		char *last_slash = strrchr(tmp_path, '/');
+		if (!last_slash || last_slash == tmp_path) {
+			fprintf(stderr, "Could not get parent directory of %s\n", tmp_path);
+			return ret;
+		}
+		*last_slash = '\0';
+		ret = rm_empty_dirs(tmp_path, first_dir);
+		if (ret != 0) {
+			fprintf(stderr, "Could not remove directories between %s and %s",first_dir, tmp_path );
+		}
+	}
+	// creation of subdir failed
+	return ret;
+}
+
+// read_block_dev_serial: Read the serial ID of a block device from the respective sysfs
+// entry.
+//
+// Arguments:
+// 1. device_name:	The device name
+// 2. serial:		The buffer to hold the serial ID that was found
+// 2. size:		The max size of the buffer
+//
+// Return value:
+// If the device exists, then 0 is returned.
+// If the deivce doe snot exist 1 is returned.
+// In all other cases or errors -1 is returned.
+int read_block_dev_serial(const char *device_name, char *serial, const size_t size) {
+	char path[PATH_MAX];
+	FILE *fp;
+	int ret = 0;
+
+	ret = snprintf(path, sizeof(path), "/sys/block/%s/serial", device_name);
+	if (ret < 0 || (size_t)ret > sizeof(path)) {
+		fprintf(stderr, "Could not create sysfs path for %s\n", device_name);
+		return -1;
+	}
+
+	fp = fopen(path, "r");
+	if (!fp) {
+		if (errno == ENOENT) {
+			return 1;
+		}
+		perror("fopen");
+		return -1;
+	}
+
+	if (fgets(serial, size, fp) == NULL) {
+		fclose(fp);
+		return -1;
+	}
+
+	// Remove trailing whitespace
+	serial[strcspn(serial, "\n\r \t")] = '\0';
+	fclose(fp);
+	return 0;
+}
+
+// find_vblock_device_by_order: Returns the nth virtio block device (vd*) if it
+// exists. The order is based on the conventional naming of virtio block devices
+// in Linux where usually the first attached is vda, second vdb etc.
+//
+// Arguments:
+// 1. n:		The order of the virtio blockd evice to retrun.
+// 2. device_path:	The buffer that will store the path to the block device.
+//
+// Return value:
+// On success 0 is returned and device_path parameter will hold the path
+// the the device with the specific ID.
+// Otherwise -1 is returned.
+int find_vblock_device_by_order(const uint32_t n, char *device_path) {
+	// TODO: Add support for more than 26 devices.
+	char suffix = 'a' + (n % 26);
+	char device_name[] = "/dev/vda";
+	int ret = 0;
+
+	device_name[7] = suffix;
+	ret = access(device_name, F_OK);
+	if (ret)
+		return -1;
+
+	snprintf(device_path, PATH_MAX, "%s", device_name);
+	return 0;
+}
+
+// find_vblock_device_by_serial: Search all virtio block devices (vd[a-z]) to find the
+// one with a specific serial ID.
+//
+// Arguments:
+// 1. target_serial:	The serial ID to search for in the devices
+// 2. device_path:	The buffer that will store the path to the block device
+//
+// Return value:
+// On success 0 is returned and device_path parameter will hold the path
+// the the device with the specific ID.
+// Otherwise -1 is returned.
+int find_vblock_device_by_serial(const char *target_serial, char *device_path) {
+	char suffix = 0;
+	char serial[SERIAL_MAX_SZ];
+	char device_name[] = "vda";
+
+	for (suffix = 'a'; suffix <= 'z'; suffix++) {
+		int ret = 0;
+
+		device_name[2] = suffix;
+		ret = read_block_dev_serial(device_name, serial, sizeof(serial));
+		if (ret < 0) {
+			fprintf(stderr, "Error getting serial id of %s\n", device_name);
+			continue;
+		} else if (ret > 0) {
+			// The device does not exist. Move to the next one.
+			continue;
+		}
+		if (strcmp(serial, target_serial) == 0) {
+			snprintf(device_path, PATH_MAX, "/dev/%s", device_name);
+			return 0;
+		}
+	}
+
+	return -1;
+}
+
+// mount_block_vols:	Mounts all block devices using their info from the
+// block_config parameter.
+//
+// Arguments:
+// 1. vols:	An array of struct block_config with information to mount
+//		block volumes
+//
+// Return value:
+// On success 0 is returned.
+// Otherwise 1 is returned.
+int mount_block_vols(struct block_config **vols) {
+	struct block_config **iter_bc = NULL;
+	char first_new_dir[PATH_MAX] = { 0 };
+	uint32_t blk_count = 0;
+
+	if (vols == NULL) {
+		DEBUG_PRINT("No block volumes to mount, nothing to do\n");
+		return 0;
+	}
+
+	for (iter_bc = vols; *iter_bc != NULL; iter_bc++) {
+		struct block_config *tmp_bc = *iter_bc;
+		char block_dev[PATH_MAX] = { 0 };
+		int ret = 0;
+
+		blk_count++;
+		first_new_dir[0] = '\0';
+		DEBUG_PRINTF("Searching block device with serial ID %s\n", tmp_bc->id);
+		if (strlen(tmp_bc->id) > 2 && tmp_bc->id[0] == 'F' && tmp_bc->id[1] == 'C') {
+			ret = find_vblock_device_by_order(blk_count, block_dev);
+		} else {
+			ret = find_vblock_device_by_serial(tmp_bc->id, block_dev);
+		}
+		if (ret) {
+			fprintf(stderr, "Could not find any virtio block device with serial ID %s\n", tmp_bc->id);
+			continue;
+		}
+		DEBUG_PRINTF("Found device %s\n", block_dev);
+		DEBUG_PRINTF("Setup the mountpoint %s\n", tmp_bc->mountpoint);
+		ret = mkdir_all(tmp_bc->mountpoint, 0755, first_new_dir);
+		if (ret != 0 ) {
+			fprintf(stderr, "Failed to create %s\n",tmp_bc->mountpoint);
+			continue;
+		}
+		DEBUG_PRINT("Mount device as ext4\n");
+		// TODO: SUpport more filesystem types
+		ret = mount(block_dev, tmp_bc->mountpoint, "ext4", 0, "");
+		if (ret != 0) {
+			perror("mount");
+			// Remove previously created directories.
+			// NOTE: In case of an error we just print a warning
+			// We might want to revisit this in the future.
+			ret = rm_empty_dirs(tmp_bc->mountpoint, first_new_dir);
+			if (ret < 0) {
+				fprintf(stderr, "WARNING: Could not remove %s and its subdirs\n", tmp_bc->mountpoint);
+			}
+		}
+	}
+
+	return 0;
+}
+
 int child_func(char *argv[]) {
 	char *config_file = NULL;
 	char *config_buf = NULL;
@@ -1036,6 +1397,11 @@ int child_func(char *argv[]) {
 		app_config = get_config_from_file(config_file, &config_buf);
 	}
 	if (app_config) {
+		ret = mount_block_vols(app_config->blk_conf);
+		if (ret != 0) {
+			fprintf(stderr, "Failed to mount block volumes\n");
+			goto child_func_free;
+		}
 		ret = setup_exec_env(app_config->pr_conf);
 		if (ret != 0) {
 			fprintf(stderr, "Failed to set up the process execution environment\n");
