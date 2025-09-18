@@ -338,10 +338,14 @@ int main(int argc, char *argv[]) {
 	pid_t app_pid;
 	int ret = 0;
 	int app_exitcode = -1;
+	char *should_set_def_route = NULL;
 
-	ret = set_default_route();
-	if (ret != 0) {
-		fprintf(stderr, "Failed to set default route\n");
+	should_set_def_route = getenv("URUNIT_DEFROUTE");
+	if (should_set_def_route) {
+		ret = set_default_route();
+		if (ret != 0) {
+			fprintf(stderr, "Failed to set default route\n");
+		}
 	}
 
 	ret = prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
