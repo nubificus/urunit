@@ -95,7 +95,7 @@ jobs:
           jq -r '.[0].Id')" >> $GITHUB_ENV
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@main
+        uses: sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62
 
       - name: Sign the published Docker image
         env:
