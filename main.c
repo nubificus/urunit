@@ -1644,6 +1644,186 @@ int set_default_route() {
 	return ret;
 }
 
+// is_block_fs: Checks if the parameter belongs to a list of known block-based
+// filesystems.
+//
+// Arguments:
+// 1. fs_type:	The filesystem type to check
+//
+// Return value:
+// If the filesystem type is a known block-based filesystem type then 1 is returned.
+// Otherwise 0 is returned.
+int is_block_fs(const char *fs_type) {
+	const char *block_types[] = {
+		"ext2", "ext3", "ext4",	"xfs", "btrfs", "f2fs",
+		"jfs", "reiserfs", "nilfs2", "vfat", "ntfs", "exfat",
+		"hfs", "hfsplus", "ufs", "minix", "iso9660", "udf",
+		NULL
+	};
+	int i = 0;
+
+	for (i = 0; block_types[i] != NULL; i++) {
+		if (strcmp(fs_type, block_types[i]) == 0) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+// is_network_fs: Checks if the parameter belongs to a list of known network-based
+// filesystems.
+//
+// Arguments:
+// 1. fs_type:	The filesystem type to check
+//
+// Return value:
+// If the filesystem type is a known network-based filesystem type then 1 is returned.
+// Otherwise 0 is returned.
+int is_network_fs(const char *fs_type) {
+	const char *network_types[] = {
+		"nfs", "nfs4", "cifs", "smb", "smbfs",
+		"ncpfs", "coda", "afs", "9p",
+		"glusterfs", "lustre", "ceph", "ocfs2",
+		NULL
+	};
+
+	for (int i = 0; network_types[i] != NULL; i++) {
+		if (strcmp(fs_type, network_types[i]) == 0) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+// is_cloud_storage_fs: Checks if the parameter belongs to a list of known cloud-based
+// filesystems.
+//
+// Arguments:
+// 1. fs_type:	The filesystem type to check
+//
+// Return value:
+// If the filesystem type is a known cloud-based filesystem type then 1 is returned.
+// Otherwise 0 is returned.
+int is_cloud_storage_fs(const char *fs_type) {
+	const char *cloud_types[] = {
+		"fuse.s3fs", "fuse.goofys", "fuse.s3backer", "fuse.gcsfuse",
+		"fuse.blobfuse", "fuse.rclone", "fuse.juicefs", "fuse.sshfs",
+		"fuse.curlftpfs", "fuse.davfs2", "fuse.httpfs", "fuse.s3ql",
+		"fuse.ossfs", "fuse.cosfs", "fuse.obsfs", "iscsi", "seaweedfs",
+		"minio",
+		NULL
+	};
+
+	for (int i = 0; cloud_types[i] != NULL; i++) {
+		if (strcmp(fs_type, cloud_types[i]) == 0) {
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
+// skip_n_words: Returns a pointer after the first n words of a string
+//
+// Arguments:
+// 1. str:	The string
+// 2. n:	The number fo words to skip
+//
+// Return value:
+// On success it returns a pointer right after the first n words inside the string str
+// Otherwise str is returned.
+char *skip_n_words(const char *str, size_t n) {
+	const char *c = str;
+	while (n > 0 && *c) {
+		// Skip multiple spaces
+		while (isspace((unsigned char)*c))
+			c++;
+		// Walk the word till space or end of string
+		while (*c && !isspace((unsigned char)*c))
+			c++;
+		n--;
+	}
+
+	// Move to the beginning of the next word
+	while (isspace((unsigned char)*c))
+			c++;
+	if (*c == 0) {
+		return (char *)str;
+	}
+
+	return (char *)c;
+}
+
+// unmount_external: Unmounts all the external filesstem mounts found in
+// /proc/self/mountinfo. External means all the known block, network and cloud storage
+// based filesystems.
+//
+// Arguments:
+//
+// Return value:
+void unmount_external() {
+	FILE *mount_info_f = NULL;
+	char line[1024] = { 0 };
+
+	mount_info_f = fopen("/proc/self/mountinfo", "r");
+	if (!mount_info_f) {
+		perror("Error opening /proc/self/mountinfo");
+		return;
+	}
+
+	while (fgets(line, sizeof(line), mount_info_f)) {
+		char *tmp = NULL;
+		char *mount_point = NULL;
+		char *mount_type = NULL;
+
+		mount_point = skip_n_words(line, 4);
+		if (mount_point == line) {
+			fprintf(stderr, "Malformed line in mountinfo. Could not reach mountpoint: %s\n", line);
+			continue;
+		}
+		tmp = strchr(mount_point, ' ');
+		if (!tmp) {
+			fprintf(stderr, "Malformed line in mountinfo. Could not get mountpoint: %s\n", line);
+			continue;
+		}
+		*tmp = '\0';
+		tmp++;
+		DEBUG_PRINTF("Found mountpoint %s\n", mount_point);
+		// SKip rootfs because we can not unmount it easily.
+		// Also, the rootfs will be be based on the container's image
+		// and hence even if somehting goes wrong, a new instance of it
+		// will get created for another container. Therefore, it will not
+		// get reused.
+		if (strcmp(mount_point, "/") == 0)
+			continue;
+		mount_type = strstr(tmp, " - ");
+		if (!mount_type) {
+			fprintf(stderr, "Malformed line in mountinfo. Could not reach mount type: %s%s\n", line, tmp);
+			continue;
+		}
+		mount_type += 3;
+		tmp = strchr(mount_type, ' ');
+		if (!tmp) {
+			fprintf(stderr, "Malformed line in mountinfo. Could not get mount type: %s%s\n", line, mount_type - 3);
+			continue;
+		}
+		*tmp = '\0';
+		DEBUG_PRINTF("Found mount type %s\n", mount_type);
+		if (is_block_fs(mount_type) ||
+		    is_network_fs(mount_type) ||
+		    is_cloud_storage_fs(mount_type)) {
+			int ret = 0;
+			DEBUG_PRINTF("Trying to unmount %s\n", mount_point);
+			ret = umount2(mount_point, MNT_FORCE);
+			if (ret) {
+				perror("umount");
+			} else {
+				DEBUG_PRINTF("Successful unmount of %s\n", mount_point);
+			}
+		}
+	}
+}
+
 int main(int argc, char *argv[]) {
 	pid_t app_pid;
 	int ret = 0;
@@ -1688,6 +1868,7 @@ int main(int argc, char *argv[]) {
 
 	DEBUG_PRINT("Exiting, will reboot in order to shutdown\n");
 	sync();
+	unmount_external();
 	syscall(SYS_reboot, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2,
 		LINUX_REBOOT_CMD_RESTART, NULL);
 }
