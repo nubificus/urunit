@@ -49,6 +49,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/mount.h>
+#include <sys/resource.h>
 #include <linux/route.h>
 #include <netinet/in.h>
 
@@ -78,10 +79,18 @@
 #define DEBUG_PRINT(fmt, ...) \
 	do { if (SHOW_DEBUG) fprintf(stderr, "[DEBUG] " fmt); } while (0)
 
+struct urunit_rlimit {
+	int type;
+	uint64_t soft;
+	uint64_t hard;
+};
+
 struct process_config {
 	uint32_t uid;
 	uint32_t gid;
 	char     *wdir;
+	struct urunit_rlimit *rlimits;
+	size_t rlimits_count;
 };
 
 struct block_config {
@@ -512,6 +521,42 @@ int get_string_val(char *str, char **value) {
 	return -1;
 }
 
+// get_rlimit_val: Parses "RLIMIT: <type> <soft> <hard>"
+// Arguments:
+// 1. str: The string to parse
+// 2. val: The struct to fill
+// Return: 0 on success, -1 on failure
+int get_rlimit_val(char *str, struct urunit_rlimit *val) {
+	char *endptr = NULL;
+	char *curr = str;
+
+	// Parse Type (int)
+	long type_val = strtol(curr, &endptr, 10);
+	if (endptr == curr) {
+		fprintf(stderr, "Failed to parse rlimit type in %s\n", str);
+		return -1;
+	}
+	val->type = (int)type_val;
+	curr = endptr;
+
+	// Parse Soft (uint64)
+	val->soft = strtoull(curr, &endptr, 10);
+	if (endptr == curr) {
+		fprintf(stderr, "Failed to parse rlimit soft value in %s\n", str);
+		return -1;
+	}
+	curr = endptr;
+
+	// Parse Hard (uint64)
+	val->hard = strtoull(curr, &endptr, 10);
+	if (endptr == curr) {
+		fprintf(stderr, "Failed to parse rlimit hard value in %s\n", str);
+		return -1;
+	}
+
+	return 0;
+}
+
 // parse_process_config: Parses a list with the following format:
 // UCS
 // UID:<uid>
@@ -543,7 +588,8 @@ struct process_config *parse_process_config(char **string_area, size_t max_sz) {
 	}
 	memset(conf, 0, sizeof(struct process_config));
 	conf->wdir = NULL; // Sanity
-
+	conf->rlimits = NULL;
+	conf->rlimits_count = 0;
 	tmp_field = strtok(*string_area, "\n");
 	// Discard the first string since it is the special string "UCS"
 	// Also, it is safe to call strtok, even if there was no '\n', since it will
@@ -570,6 +616,45 @@ struct process_config *parse_process_config(char **string_area, size_t max_sz) {
 				fprintf(stderr, "Failed to retreive WD information from %s\n", tmp_field);
 				break;
 			}
+		} else if (memcmp(tmp_field, "RLM", 3) == 0) {
+			uint32_t count = 0;
+			// Parse the count "RLM: <count>"
+			ret = get_uint_val(tmp_field, &count);
+			if (ret != 0) {
+				fprintf(stderr, "Failed to retrieve RLM count from %s\n", tmp_field);
+				break;
+			}
+
+			if (count > 0) {
+				// Allocate memory exactly once
+				conf->rlimits = malloc(count * sizeof(struct urunit_rlimit));
+				if (!conf->rlimits) {
+					fprintf(stderr, "Failed to allocate memory for rlimits\n");
+					// Exit immediately on allocation failure as requested
+					free(conf);
+					return NULL;
+				}
+				conf->rlimits_count = count;
+
+				// Loop to read the next 'count' lines
+				for (size_t k = 0; k < count; k++) {
+					tmp_field = strtok(NULL, "\n");
+					if (!tmp_field) {
+						fprintf(stderr, "Unexpected end of config while reading rlimits\n");
+						// If we fail here, we must free the previously allocated rlimits
+						free(conf->rlimits);
+						free(conf);
+						return NULL;
+					}
+					// Parse the "type soft hard" line
+					if (get_rlimit_val(tmp_field, &conf->rlimits[k]) != 0) {
+						fprintf(stderr, "Failed to parse rlimit entry: %s\n", tmp_field);
+						free(conf->rlimits);
+						free(conf);
+						return NULL;
+					}
+				}
+			}
 		} else 	if (memcmp(tmp_field, "UCE", 3) == 0) {
 			*string_area = tmp_field + 4; // 4 bytes for the "UCE" string
 			return conf;
@@ -577,7 +662,7 @@ struct process_config *parse_process_config(char **string_area, size_t max_sz) {
 
 		tmp_field = strtok(NULL, "\n");
 	}
-
+	free(conf->rlimits);
 	free(conf);
 	return NULL;
 }
@@ -986,6 +1071,25 @@ int setup_exec_env(struct process_config *process_conf) {
 		DEBUG_PRINT("Empty config, nothing to be done\n");
 		return 0;
 	}
+	if (process_conf->rlimits_count > 0) {
+        DEBUG_PRINTF("Setting %lu resource limits\n", process_conf->rlimits_count);
+        for (size_t i = 0; i < process_conf->rlimits_count; i++) {
+            struct rlimit rl;
+            rl.rlim_cur = process_conf->rlimits[i].soft;
+            rl.rlim_max = process_conf->rlimits[i].hard;
+            int type = process_conf->rlimits[i].type;
+
+            DEBUG_PRINTF("Setting rlimit type %d: soft=%lu, hard=%lu\n",
+                         type, rl.rlim_cur, rl.rlim_max);
+
+            ret = setrlimit(type, &rl);
+            if (ret < 0) {
+                fprintf(stderr, "Failed to set rlimit type %d\n", type);
+                perror("setrlimit");
+                return 1;
+            }
+        }
+    }
 
 	DEBUG_PRINTF("Setting gid to %d\n", process_conf->gid);
 	ret = setgid(process_conf->gid);
@@ -1416,7 +1520,10 @@ int child_func(char *argv[]) {
 child_func_free:
 	free(config_buf);
 	free(app_config->envs);
-	free(app_config->pr_conf);
+	if (app_config->pr_conf) {
+		free(app_config->pr_conf->rlimits);
+		free(app_config->pr_conf);
+	}
 	free(app_config);
 
 	return ret;
