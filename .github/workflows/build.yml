@@ -1,4 +1,4 @@
-name: 🍜 Build/publish runners
+name: Build/publish urunit images
 
 on:
   workflow_call:
@@ -9,9 +9,6 @@ on:
       runner-archs:
         type: string
         default: '["amd64", "aarch64"]'
-      dockerfiles:
-        type: string
-        default: '["Dockerfile"]'
       runner-arch-map:
         type: string
         default: '[{"amd64":"x86_64", "aarch64":"aarch64", "armv7l":"armv7l"}]'
@@ -24,85 +21,73 @@ on:
     secrets:
       GIT_CLONE_PAT:
         required: false
-      AWS_ACCESS_KEY:
-        required: false
-      AWS_SECRET_ACCESS_KEY:
-        required: false
       harbor_user:
-        required: false
+        required: true
       harbor_secret:
-        required: false
+        required: true
 
 jobs:
   build-all:
-    runs-on: ${{ format('{0}-{1}', join(fromJSON(inputs.runner), '-'), matrix.arch) }}
-    permissions:
-      contents: write # for uploading the SBOM to the release
-      packages: write # for uploading the finished container
-      security-events: write # for github/codeql-action/upload-sarif to upload SARIF results
-      id-token: write # to complete the identity challenge with sigstore/fulcio when running outside of PRs
     strategy:
       matrix:
-        dockerfile: ["${{ fromJSON(inputs.dockerfiles) }}"]
         arch: ["${{ fromJSON(inputs.runner-archs) }}"]
+    runs-on: ${{ format('{0}-{1}', join(fromJSON(inputs.runner), '-'), matrix.arch) }}
+    permissions:
+      id-token: write # to complete the identity challenge with sigstore/fulcio when running outside of PRs
     continue-on-error: true
-
     env:
-      REGISTRY: ${{ inputs.registry }}
       IMAGE_NAME: ${{ inputs.registry }}/${{ github.repository }}
-      ARCH: ${{ matrix.arch }}
-
     steps:
       - name: Checkout the repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
 
       - name: Set short SHA
         run: echo "SHA_SHORT=${GITHUB_SHA::7}" >> $GITHUB_ENV
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
-      - name: Log into registry ${{ env.REGISTRY }}
-        uses: docker/login-action@28218f9b04b4f3f62068d7b6ce6ca5b26e35336c
+      - name: Log into registry ${{ inputs.registry }}
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ${{ inputs.registry }}
           username: ${{ secrets.harbor_user }}
           password: ${{ secrets.harbor_secret }}
 
       - name: Extract Docker metadata
         id: meta
-        uses: docker/metadata-action@98669ae865ea3cffbcbaa878cf57c20bbf1c6c38
+        uses: docker/metadata-action@318604b99e75e41977312d83839a89be02ca4893
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
-            type=sha,prefix=${{ env.ARCH }}-
+            type=sha,prefix=${{ matrix.arch }}-
  
-      - name: Build and push ${{ matrix.dockerfile }}-${{ matrix.arch}}
+      - name: Build and push urunit image for ${{ matrix.arch}}
         id: build-and-push
-        uses: docker/build-push-action@master
+        uses: docker/build-push-action@9e436ba9f2d7bcd1d038c8e55d039d37896ddc5d # master
         with:
           context: .
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           push: true
-          file: ${{ matrix.dockerfile }}
+          file: "Dockerfile"
           provenance: false
  
       - name: Get image digest
         run: |
           echo "IMAGE_DIGEST=$(docker inspect \
-          ${{ env.REGISTRY }}/${{ github.repository }}:${{ env.ARCH }}-${{ env.SHA_SHORT }} | \
+          ${{ env.IMAGE_NAME }}:${{ matrix.arch }}-${{ env.SHA_SHORT }} | \
           jq -r '.[0].Id')" >> $GITHUB_ENV
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62
+        uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # main
 
       - name: Sign the published Docker image
         env:
           COSIGN_EXPERIMENTAL: "true"
           DIGEST: ${{steps.build-and-push.outputs.digest}}
         run: |
-          cosign sign --yes ${{ env.REGISTRY }}/${{ github.repository }}@$DIGEST \
+          cosign sign --yes ${{ env.IMAGE_NAME }}@$DIGEST \
           -a "repo=${{github.repository}}" \
           -a "workflow=${{github.workflow}}" \
           -a "ref=${{github.sha}}" \
@@ -112,27 +97,20 @@ jobs:
     needs: [build-all]
     runs-on: base-dind-2204-amd64
     permissions:
-      contents: write # for uploading the SBOM to the release
-      packages: write # for uploading the finished container
-      security-events: write # for github/codeql-action/upload-sarif to upload SARIF results
       id-token: write # to complete the identity challenge with sigstore/fulcio when running outside of PRs
-    strategy:
-      matrix:
-        dockerfile: ["${{ fromJSON(inputs.dockerfiles) }}"] 
     env:
-      REGISTRY: ${{ inputs.registry }}
-
+      IMAGE_NAME: ${{ inputs.registry }}/${{ github.repository }}
     steps:
       - name: Checkout the repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
 
       - name: Set short SHA
         run: echo "SHA_SHORT=${GITHUB_SHA::7}" >> $GITHUB_ENV
 
-      - name: Log into registry ${{ inputs.REGISTRY }}
-        uses: docker/login-action@28218f9b04b4f3f62068d7b6ce6ca5b26e35336c
+      - name: Log into registry ${{ inputs.registry }}
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ${{ inputs.registry }}
           username: ${{ secrets.harbor_user }}
           password: ${{ secrets.harbor_secret }}
 
@@ -159,30 +137,28 @@ jobs:
 
           # Loop over the architectures and build the amend command
           for arch in $(echo $runner_archs | jq -r '.[]'); do
-            amend_command+=" --amend ${{ env.REGISTRY }}/${{ github.repository }}:$arch-${{ env.SHA_SHORT }}"
+            amend_command+=" --amend ${{ env.IMAGE_NAME }}:$arch-${{ env.SHA_SHORT }}"
           done
 
           echo "-------------------- Amend command constructed -------------------"
           echo "$amend_command"
 
           # Create the docker manifest with the amend command
-          docker manifest create ${{ env.REGISTRY }}/${{ github.repository }}:${{ env.TAG }} $amend_command
+          docker manifest create ${{ env.IMAGE_NAME }}:${{ env.TAG }} $amend_command
 
           # Optionally push the manifest (comment out if not needed)
-          #          docker manifest push ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.dockerfile }}:${{ env.TAG }}
-          VAR=`docker manifest push ${{ env.REGISTRY }}/${{ github.repository }}:${{ env.TAG }} | tail -1`
+          VAR=`docker manifest push ${{ env.IMAGE_NAME }}:${{ env.TAG }} | tail -1`
           echo "manifest_sha=$VAR" >> "$GITHUB_OUTPUT"
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62
+        uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # main
 
       - name: Sign the published Docker image
         env:
           COSIGN_EXPERIMENTAL: "true"
           DIGEST: ${{steps.create-manifest.outputs.manifest_sha }}
         run: |
-          #cosign sign --yes harbor.nbfc.io/nubificus/${{ github.repository }}/${{ matrix.dockerfile }}:${{ env.ARCH }}-${{ env.SHA_SHORT }}@$DIGEST \
-          cosign sign --yes ${{ env.REGISTRY }}/${{ github.repository }}@$DIGEST \
+          cosign sign --yes ${{ env.IMAGE_NAME }}@$DIGEST \
           -a "repo=${{github.repository}}" \
           -a "workflow=${{github.workflow}}" \
           -a "ref=${{github.sha}}" \
