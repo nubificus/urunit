@@ -5,11 +5,7 @@ on:
     branches: ["main"]
   push:
     branches: ["main"]
-  workflow_dispatch: # build on demand
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  workflow_dispatch:
 
 jobs:
   get-changed-files:
@@ -23,7 +19,7 @@ jobs:
       c: ${{ steps.filter.outputs.c }}
     steps:
       - name: Check out code
-        uses: actions/checkout@v3
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
 
       - name: Get Changed Files
         id: filter
@@ -51,7 +47,7 @@ jobs:
 
   build-urunit:
     needs: [get-changed-files]
-    name: Urunit
+    name: Build and push urunit container images
     if: ${{ needs.get-changed-files.outputs.c == 'true' || needs.get-changed-files.outputs.dockerfile == 'true' || needs.get-changed-files.outputs.version == 'true' }}
     uses: ./.github/workflows/build.yml
     secrets: inherit
