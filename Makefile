@@ -37,10 +37,12 @@ LDFLAGS        := -Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-s
 STATIC_LDFLAGS := -Wl,--no-export-dynamic -static
 
 # Source files variables
-URUNIT_SRC := main.c common.c
+SOURCE_DIR := src
+
+URUNIT_SRC := ${SOURCE_DIR}/main.c ${SOURCE_DIR}/common.c
 
 # Header files
-URUNIT_HDR := common.h
+URUNIT_HDR := ${SOURCE_DIR}/common.h
 
 # Install dependencies variables
 #
@@ -73,7 +75,7 @@ ifndef TARGET_OS
 endif
 
 ifeq ($(TARGET_OS),Linux)
-    URUNIT_SRC += linux.c
+    URUNIT_SRC += ${SOURCE_DIR}/linux.c
 endif
 
 # Main Building rules
