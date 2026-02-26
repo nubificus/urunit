@@ -37,7 +37,10 @@ LDFLAGS        := -Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-s
 STATIC_LDFLAGS := -Wl,--no-export-dynamic -static
 
 # Source files variables
-URUNIT_SRC := main.c
+URUNIT_SRC := main.c common.c
+
+# Header files
+URUNIT_HDR := common.h
 
 # Install dependencies variables
 #
@@ -50,6 +53,28 @@ INSTALL_DEPS   =  $(shell test -e $(URUNIT_BIN_STATIC) \
                           || test -e $(URUNIT_BIN_DYNAMIC) \
                              && echo $(URUNIT_BIN_DYNAMIC) \
                              || echo $(URUNIT_BIN_STATIC))
+
+# ---------------------------------------------------------------
+#  Target OS detection
+#
+# Priority:
+#   1. Explicit TARGET_OS variable    (make TARGET_OS=FreeBSD)
+#   2. Compiler's target triple       (gcc -dumpmachine)
+#   3. Host OS via uname              (native build fallback)
+# ---------------------------------------------------------------
+#? TARGET_OS Target OS for cross-compilation (default: auto-detected) 
+CC_TARGET := $(shell $(CC) -dumpmachine 2>/dev/null)
+ifndef TARGET_OS
+    ifneq ($(findstring linux,$(CC_TARGET)),)
+        TARGET_OS := Linux
+    else
+        TARGET_OS := $(shell uname -s)
+    endif
+endif
+
+ifeq ($(TARGET_OS),Linux)
+    URUNIT_SRC += linux.c
+endif
 
 # Main Building rules
 #
@@ -86,16 +111,16 @@ dynamic_debug: $(URUNIT_BIN_DYNAMIC_DEBUG)
 $(BUILD_DIR):
 	mkdir -p $@
 
-$(URUNIT_BIN_DYNAMIC): $(URUNIT_SRC) | prepare
+$(URUNIT_BIN_DYNAMIC): $(URUNIT_SRC) $(URUNIT_HDR) | prepare
 	$(CC) $(CFLAGS) $(URUNIT_SRC) $(LDFLAGS) -o $@
 
-$(URUNIT_BIN_DYNAMIC_DEBUG): $(URUNIT_SRC) | prepare
+$(URUNIT_BIN_DYNAMIC_DEBUG): $(URUNIT_SRC) $(URUNIT_HDR) | prepare
 	$(CC) $(CFLAGS) -DDEBUG $(URUNIT_SRC) $(LDFLAGS) -o $@
 
-$(URUNIT_BIN_STATIC): $(URUNIT_SRC) | prepare
+$(URUNIT_BIN_STATIC): $(URUNIT_SRC) $(URUNIT_HDR) | prepare
 	$(CC) $(CFLAGS) $(URUNIT_SRC) $(LDFLAGS) $(STATIC_LDFLAGS) -o $@
 
-$(URUNIT_BIN_STATIC_DEBUG): $(URUNIT_SRC) | prepare
+$(URUNIT_BIN_STATIC_DEBUG): $(URUNIT_SRC) $(URUNIT_HDR) | prepare
 	$(CC) $(CFLAGS) -DDEBUG $(URUNIT_SRC) $(LDFLAGS) $(STATIC_LDFLAGS) -o $@
 
 ## install Install urunit in PREFIX

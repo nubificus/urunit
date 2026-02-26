@@ -4,7 +4,7 @@ WORKDIR /urunit
 
 COPY Makefile .
 
-COPY main.c .
+COPY main.c common.c common.h linux.c .
 
 RUN apk update && apk add build-base linux-headers
 
