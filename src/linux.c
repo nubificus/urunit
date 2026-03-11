@@ -48,7 +48,7 @@ int read_block_dev_serial(const char *device_name, char *serial, const size_t si
 	int ret = 0;
 
 	ret = snprintf(path, sizeof(path), "/sys/block/%s/serial", device_name);
-	if (ret < 0 || (size_t)ret > sizeof(path)) {
+	if (ret < 0 || (size_t)ret >= sizeof(path)) {
 		fprintf(stderr, "Could not create sysfs path for %s\n", device_name);
 		return -1;
 	}
@@ -73,12 +73,13 @@ int read_block_dev_serial(const char *device_name, char *serial, const size_t si
 	return 0;
 }
 
-// find_vblock_device_by_order: Returns the nth virtio block device (vd*) if it
-// exists. The order is based on the conventional naming of virtio block devices
-// in Linux where usually the first attached is vda, second vdb etc.
+// find_vblock_device_by_order: Returns the nth (zero-based) virtio block device
+// (vd*) if it exists. The order is based on the conventional naming of virtio
+// block devices in Linux where usually the first attached is vda, second vdb,
+// etc. In this function, n == 0 maps to /dev/vda, n == 1 to /dev/vdb, and so on.
 //
 // Arguments:
-// 1. n:		The order of the virtio blockd evice to retrun.
+// 1. n:		Zero-based index of the virtio block device to return.
 // 2. device_path:	The buffer that will store the path to the block device.
 //
 // Return value:
@@ -96,7 +97,10 @@ int find_vblock_device_by_order(const uint32_t n, char *device_path) {
 	if (ret)
 		return -1;
 
-	snprintf(device_path, PATH_MAX, "%s", device_name);
+	// It is safe here to doa quick memcpy, since device_name has
+	// a specific size and only its last character (of the string,
+	// not NULL temrination byte) can change
+	memcpy(device_path, device_name, sizeof(device_name));
 	return 0;
 }
 
@@ -129,7 +133,11 @@ int find_vblock_device_by_serial(const char *target_serial, char *device_path) {
 			continue;
 		}
 		if (strcmp(serial, target_serial) == 0) {
-			snprintf(device_path, PATH_MAX, "/dev/%s", device_name);
+			int ret = snprintf(device_path, PATH_MAX, "/dev/%s", device_name);
+			if (ret < 0 || (size_t)ret >= PATH_MAX) {
+				fprintf(stderr, "Could not copy the found device: %s", device_name);
+				return -1;
+			}
 			return 0;
 		}
 	}
@@ -216,16 +224,18 @@ int mount_block_vols(struct block_config **vols) {
 			continue;
 		}
 		DEBUG_PRINT("Mount device as ext4\n");
-		// TODO: SUpport more filesystem types
+		// TODO: Support more filesystem types
 		ret = mount(block_dev, tmp_bc->mountpoint, "ext4", 0, "");
 		if (ret != 0) {
 			perror("mount");
 			// Remove previously created directories.
 			// NOTE: In case of an error we just print a warning
 			// We might want to revisit this in the future.
-			ret = rm_empty_dirs(tmp_bc->mountpoint, first_new_dir);
-			if (ret < 0) {
-				fprintf(stderr, "WARNING: Could not remove %s and its subdirs\n", tmp_bc->mountpoint);
+			if (first_new_dir[0] != '\0') {
+				ret = rm_empty_dirs(tmp_bc->mountpoint, first_new_dir);
+				if (ret < 0) {
+					fprintf(stderr, "WARNING: Could not remove %s and its subdirs\n", tmp_bc->mountpoint);
+				}
 			}
 		}
 	}
@@ -268,7 +278,7 @@ int set_default_route() {
 
 	DEBUG_PRINT("Setting default route to eth0\n");
 	rt.rt_flags = RTF_UP;
-	// TODO: We might want to doscover or somehow
+	// TODO: We might want to discover or somehow
 	// get the interface as a parameter.
 	rt.rt_dev = ETH0_IF;
 
@@ -316,9 +326,9 @@ void unmount_external() {
 		*tmp = '\0';
 		tmp++;
 		DEBUG_PRINTF("Found mountpoint %s\n", mount_point);
-		// SKip rootfs because we can not unmount it easily.
-		// Also, the rootfs will be be based on the container's image
-		// and hence even if somehting goes wrong, a new instance of it
+		// Skip rootfs because we can not unmount it easily.
+		// Also, the rootfs will be based on the container's image
+		// and hence even if something goes wrong, a new instance of it
 		// will get created for another container. Therefore, it will not
 		// get reused.
 		if (strcmp(mount_point, "/") == 0)
@@ -349,6 +359,8 @@ void unmount_external() {
 			}
 		}
 	}
+
+	fclose(mount_info_f);
 }
 
 int set_subreaper() {
