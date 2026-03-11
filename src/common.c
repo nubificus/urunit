@@ -29,7 +29,7 @@
 // 1. path:	The directory to check and create if does not exist
 //
 // Return value:
-// It returns 0 in success. Otherwise it returns 1.
+// It returns 0 on success. Otherwise it returns -1.
 int ensure_dir(const char *path) {
 	struct stat st;
 	int ret = 0;
@@ -96,7 +96,7 @@ int mkdir_all(const char *path, mode_t mode, char *first_dir) {
 	}
 
 	ret = snprintf(tmp_path, sizeof(tmp_path), "%s", path);
-	if (ret <= 0 || (size_t)ret > sizeof(tmp_path)) {
+	if (ret < 0 || (size_t)ret >= sizeof(tmp_path)) {
 		fprintf(stderr, "Could not create a copy of %s\n", path);
 		return -1;
 	}
@@ -128,7 +128,7 @@ int mkdir_all(const char *path, mode_t mode, char *first_dir) {
 		}
 		if (ret == 0 && is_first) {
 			ret = snprintf(first_dir, or_path_len, "%s", tmp_path);
-			if (ret < 0 || (size_t)ret > or_path_len) {
+			if (ret < 0 || (size_t)ret >= or_path_len) {
 				fprintf(stderr, "Could not copy first created path %s", tmp_path);
 				return -1;
 			}
@@ -149,7 +149,7 @@ int mkdir_all(const char *path, mode_t mode, char *first_dir) {
 	}
 	if (ret == 0 && is_first) {
 		ret = snprintf(first_dir, or_path_len, "%s", tmp_path);
-		if (ret < 0 || (size_t)ret > or_path_len) {
+		if (ret < 0 || (size_t)ret >= or_path_len) {
 			fprintf(stderr, "Could not copy first created directory %s\n", tmp_path);
 			return -1;
 		}
@@ -161,7 +161,7 @@ mkdir_all_cleanup:
 	// If we have not created any directory yet then is_first will be 1
 	// and hence we do not have to remove any directory.
 	if (!is_first) {
-		int ret = 0;
+		int ret_cleanup = 0;
 		// However, the fail took place for the tmp_path directory
 		// which was not created and hence we do not have to remove it.
 		// Therefore, move to the parent directory.
@@ -171,8 +171,8 @@ mkdir_all_cleanup:
 			return ret;
 		}
 		*last_slash = '\0';
-		ret = rm_empty_dirs(tmp_path, first_dir);
-		if (ret != 0) {
+		ret_cleanup = rm_empty_dirs(tmp_path, first_dir);
+		if (ret_cleanup != 0) {
 			fprintf(stderr, "Could not remove directories between %s and %s",first_dir, tmp_path );
 		}
 	}
@@ -195,7 +195,7 @@ int rm_empty_dirs(const char *dir, const char *top_dir) {
 	int ret = 0;
 
 	ret = snprintf(current, sizeof(current), "%s", dir);
-	if (ret <= 0 || (size_t)ret > sizeof(current)) {
+	if (ret <= 0 || (size_t)ret >= sizeof(current)) {
 		fprintf(stderr, "Could not copy %s\n", dir);
 		return -1;
 	}
@@ -250,7 +250,7 @@ int rm_empty_dirs(const char *dir, const char *top_dir) {
 //
 // Arguments:
 // 1. str:	The string
-// 2. n:	The number fo words to skip
+// 2. n:	The number of words to skip
 //
 // Return value:
 // On success it returns a pointer right after the first n words inside the string str
