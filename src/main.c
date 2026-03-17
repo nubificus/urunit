@@ -43,6 +43,7 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 
+#include <signal.h>
 #include <errno.h>
 #include <string.h>
 #include <stdio.h>

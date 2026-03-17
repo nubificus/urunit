@@ -153,7 +153,7 @@ int find_vblock_device_by_serial(const char *target_serial, char *device_path) {
 //
 // Return value:
 // It returns 0 in success. Otherwise it returns 1.
-int mount_special_fs() {
+int mount_special_fs(void) {
 	int ret = 0;
 
 	ret = ensure_dir("/proc");
@@ -250,7 +250,7 @@ int mount_block_vols(struct block_config **vols) {
 //
 // Return value:
 // On success 0 is returned. Otherwise a non-zero value is returned.
-int set_default_route() {
+int set_default_route(void) {
 	int sockfd;
 	struct rtentry rt;
 	struct sockaddr_in addr;
@@ -298,7 +298,7 @@ int set_default_route() {
 // Arguments:
 //
 // Return value:
-void unmount_external() {
+void unmount_external(void) {
 	FILE *mount_info_f = NULL;
 	char line[1024] = { 0 };
 
@@ -363,11 +363,11 @@ void unmount_external() {
 	fclose(mount_info_f);
 }
 
-int set_subreaper() {
+int set_subreaper(void) {
 	return prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
 }
 
-void request_reboot() {
+void request_reboot(void) {
 	syscall(SYS_reboot, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2,
 		LINUX_REBOOT_CMD_RESTART, NULL);
 }
