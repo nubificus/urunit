@@ -146,7 +146,7 @@ int find_vblock_device_by_serial(const char *target_serial, char *device_path) {
 }
 
 // mount_special_fs: Mounts the special filesystems procfs and sysfs in /proc and
-// /sys respectively.
+// /sys respectively, plus a tmpfs on /tmp.
 //
 // Arguments:
 // No arguments.
@@ -174,6 +174,16 @@ int mount_special_fs(void) {
 	if (ret < 0) {
 		perror("mount /sys");
 		return 1;
+	}
+
+	// A writable /tmp is expected by most applications. Unlike /proc and
+	// /sys, urunit does not itself depend on it, so a failure is not fatal.
+	ret = ensure_dir("/tmp");
+	if (ret == 0) {
+		ret = mount("tmpfs", "/tmp", "tmpfs", MS_NOSUID|MS_NODEV, "mode=1777");
+		if (ret < 0) {
+			perror("mount /tmp");
+		}
 	}
 
 	return 0;
