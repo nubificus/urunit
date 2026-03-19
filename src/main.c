@@ -43,6 +43,7 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 
+#include <fcntl.h>
 #include <signal.h>
 #include <errno.h>
 #include <string.h>
@@ -168,22 +169,20 @@ read_exact_error:
 	return NULL;
 }
 
-// read_file_and_size: Reads the file <file> from arguments and returns buffer
-// with all the contents of the file. Furthermore, it stores in the size argument
-// the total size of the file.
+// read_file_and_size: Opens <file>, determines whether it is a regular file or
+// a block device and reads it accordingly.
 //
 // Arguments:
 // 1. file:	The file to read
 // 2. size:	The total size of the file
 //
 // Return value:
-// On success it returns a buffer with all the contents of the file and updates the
-// size argument to contain the total size of the file.
+// On success it returns a buffer with all the contents of the file and updates
+// the size argument to contain the total size of the file.
 // On failure, it returns NULL.
 char *read_file_and_size(char *file, size_t *size) {
 	FILE *fp = NULL;
 	struct stat st = { 0 };
-	int ret = 0;
 	char *buf = NULL;
 
 	DEBUG_PRINTF("Read configuration file %s\n", file);
@@ -195,24 +194,30 @@ char *read_file_and_size(char *file, size_t *size) {
 
 	// Find the total size of the file in order to read the whole file
 	// and have a limit to search in the buffer.
-	ret = fstat(fileno(fp), &st);
-	if (ret != 0) {
+	if (fstat(fileno(fp), &st) != 0) {
 		perror("Getting configuration file size");
-		goto exit_read_file;
+		fclose(fp);
+		return NULL;
 	}
-	DEBUG_PRINTF("Total size of configuration file %ld\n", st.st_size);
 
-	// Make sure to read the whole file in one buffer.
-	buf = read_exact_size(fp, st.st_size);
-	if (!buf) {
-		fprintf(stderr, "Could not read whole configuration file\n");
-		goto exit_read_file;
+	// A raw block device has no size in st_size, so it is read by
+	// the platform code (which only borrows the descriptor); a regular file
+	// is read through the stdio stream. Only one of the two interfaces is
+	// used per call, so the stdio buffer and the raw reads never disagree.
+	if (S_ISCHR(st.st_mode) || S_ISBLK(st.st_mode)) {
+		DEBUG_PRINT("Configuration is a block device\n");
+		buf = read_raw_device(fileno(fp), size);
+	} else {
+		DEBUG_PRINTF("Total size of configuration file %ld\n", (long)st.st_size);
+		buf = read_exact_size(fp, st.st_size);
+		if (buf)
+			*size = st.st_size;
 	}
-	DEBUG_PRINTF("Contents of configuration file\n%s\n", buf);
-	*size = st.st_size;
-
-exit_read_file:
 	fclose(fp);
+	if (!buf) {
+		fprintf(stderr, "Could not read configuration %s\n", file);
+	}
+
 	return buf;
 }
 
@@ -1153,6 +1158,13 @@ int main(int argc, char *argv[]) {
 	int ret = 0;
 	int app_exitcode = -1;
 	char *should_set_def_route = NULL;
+
+	// When started by the kernel as init we may have no console yet.
+	setup_console();
+
+	// The kernel may mount the root read-only (FreeBSD does); remount it
+	// read-write for the application, regardless of the configuration.
+	remount_root_rw();
 
 	should_set_def_route = getenv("URUNIT_DEFROUTE");
 	if (should_set_def_route) {

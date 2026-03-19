@@ -49,6 +49,12 @@ int is_block_fs(const char *fs_type);
 int is_network_fs(const char *fs_type);
 int is_cloud_storage_fs(const char *fs_type);
 
+// Platform specific functions
+int setup_console(void);
+int remount_root_rw(void);
+char *get_boot_var(const char *name);
+char *read_raw_device(int fd, size_t *size);
+int configure_network(struct net_config *net);
 int read_block_dev_serial(const char *device_name, char *serial, const size_t size);
 int find_vblock_device_by_order(const uint32_t n, char *device_path);
 int find_vblock_device_by_serial(const char *target_serial, char *device_path);
