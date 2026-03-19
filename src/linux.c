@@ -12,10 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <stdio.h> 
+#include <stdio.h>
 #include <limits.h>
 #include <errno.h>
 #include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <linux/fs.h>
 
 #include <linux/reboot.h>
 #include <sys/syscall.h>
@@ -375,6 +378,80 @@ void unmount_external(void) {
 
 int set_subreaper(void) {
 	return prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
+}
+
+// setup_console: On Linux the kernel opens the console for init.
+int setup_console(void) {
+	return 0;
+}
+
+// remount_root_rw: On Linux the root filesystem is already writable by the time
+// urunit runs (urunc/the kernel set it up), so there is nothing to do here.
+int remount_root_rw(void) {
+	return 0;
+}
+
+// get_boot_var: On Linux, name=value boot parameters reach init as
+// environment variables, so there is nothing else to look at.
+char *get_boot_var(const char *name) {
+	(void)name; // just to suppress the unused warning
+	return NULL;
+}
+
+// read_raw_device: Reads the whole contents of a block device. The caller is
+// responsible to free the returned buffer.
+char *read_raw_device(int fd, size_t *size) {
+	uint64_t dev_size = 0;
+	char *buffer = NULL;
+	size_t off = 0;
+	int ret = 0;
+	// BLKGETSIZE64 does not fit in an int. glibc's ioctl takes an unsigned
+	// long request, but musl's takes an int, so passing the constant
+	// directly overflows under -Werror there. Hold it in an unsigned long
+	// so the (musl) narrowing is a runtime conversion, not a constant one.
+	unsigned long request = BLKGETSIZE64;
+
+	ret = ioctl(fd, request, &dev_size);
+	if (ret < 0) {
+		perror("BLKGETSIZE64");
+		return NULL;
+	}
+	if (dev_size == 0 || dev_size > (1024 * 1024)) {
+		fprintf(stderr, "Unexpected configuration device size %llu\n",
+			(unsigned long long)dev_size);
+		return NULL;
+	}
+	buffer = malloc(dev_size + 1);
+	if (!buffer) {
+		fprintf(stderr, "Failed to allocate memory for the configuration device\n");
+		return NULL;
+	}
+	while (off < dev_size) {
+		ssize_t n = 0;
+
+		n = pread(fd, buffer + off, dev_size - off, (off_t)off);
+		if (n < 0) {
+			if (errno == EINTR)
+				continue;
+			perror("read configuration device");
+			free(buffer);
+			return NULL;
+		}
+		if (n == 0)
+			break;
+		off += (size_t)n;
+	}
+	buffer[off] = '\0';
+	*size = off;
+
+	return buffer;
+}
+
+// configure_network: On Linux the network is configured by the kernel
+// through the ip= boot parameter.
+int configure_network(struct net_config *net) {
+	(void)net;
+	return 0;
 }
 
 void request_reboot(void) {
