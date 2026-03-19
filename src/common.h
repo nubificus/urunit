@@ -33,7 +33,7 @@
 #define DEBUG_PRINTF(fmt, ...) \
 	do { if (SHOW_DEBUG) fprintf(stderr, "[DEBUG] " fmt, __VA_ARGS__); } while (0)
 
-#define DEBUG_PRINT(fmt, ...) \
+#define DEBUG_PRINT(fmt) \
 	do { if (SHOW_DEBUG) fprintf(stderr, "[DEBUG] " fmt); } while (0)
 
 struct block_config {
@@ -52,15 +52,15 @@ int is_cloud_storage_fs(const char *fs_type);
 int read_block_dev_serial(const char *device_name, char *serial, const size_t size);
 int find_vblock_device_by_order(const uint32_t n, char *device_path);
 int find_vblock_device_by_serial(const char *target_serial, char *device_path);
-int mount_special_fs();
+int mount_special_fs(void);
 int mount_block_vols(struct block_config **vols);
 #if defined(__linux__)
 int set_default_route();
 #else
 int set_default_route(const char *gateway_ip);
 #endif
-void unmount_external();
-int set_subreaper();
-void request_reboot();
+void unmount_external(void);
+int set_subreaper(void);
+void request_reboot(void);
 
 #endif // COMMON_H

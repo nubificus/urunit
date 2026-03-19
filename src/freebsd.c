@@ -28,7 +28,9 @@
 
 #include <net/route.h>
 #include <net/if.h>
+#include <net/if_dl.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -75,7 +77,7 @@ int read_block_dev_serial(const char *device_name, char *serial, const size_t si
 	close(fd);
 	if (ret < 0) {
 		perror("ioctl DIOCGIDENT");
-		return -1;'
+		return -1;
 	}
 
 	if (ident[0] == '\0') {
@@ -172,7 +174,7 @@ int find_vblock_device_by_serial(const char *target_serial, char *device_path) {
 //
 // Return value:
 // It returns 0 in success. Otherwise it returns 1.
-int mount_special_fs() {
+int mount_special_fs(void) {
 	int ret = 0;
 	struct iovec iov[4];
 
@@ -393,7 +395,7 @@ int set_default_route(const char *gateway_ip) {
 // Arguments:
 //
 // Return value:
-void unmount_external() {
+void unmount_external(void) {
 	struct statfs *mntbuf = NULL;
 	int mntcount = 0;
 	int i = 0;
@@ -429,10 +431,10 @@ void unmount_external() {
 	}
 }
 
-int set_subreaper() {
+int set_subreaper(void) {
 	return procctl(P_PID, 0, PROC_REAP_ACQUIRE, NULL);
 }
 
-void request_reboot() {
+void request_reboot(void) {
 	reboot(RB_AUTOBOOT);
 }

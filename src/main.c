@@ -43,6 +43,10 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 
+#if defined(__FreeBSD__)
+#include <signal.h>
+#endif
+
 #include <errno.h>
 #include <string.h>
 #include <stdio.h>
@@ -953,7 +957,7 @@ int child_func(char *argv[]) {
 	config_file = getenv("URUNIT_CONFIG");
 #else
 	config_file = freebsd_config_path;
-#endif;
+#endif
 	if (config_file) {
 		// We need to mount sysfs to read the data from retained initrd
 		ret = mount_special_fs();
