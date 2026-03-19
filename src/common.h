@@ -62,5 +62,6 @@ int set_default_route(const char *gateway_ip);
 void unmount_external(void);
 int set_subreaper(void);
 void request_reboot(void);
+int set_iface_addr(const char *ip, const char *netmask);
 
 #endif // COMMON_H

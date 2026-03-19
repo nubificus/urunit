@@ -438,3 +438,94 @@ int set_subreaper(void) {
 void request_reboot(void) {
 	reboot(RB_AUTOBOOT);
 }
+
+// set_iface_addr: Sets the IP address and netmask on the default network
+// interface
+//
+// Arguments:
+// 1. ip:      The IPv4 address as a string (e.g. "10.0.2.15")
+// 2. netmask: The netmask as a string (e.g. "255.255.255.0")
+//
+// Return value:
+// On success 0 is returned. Otherwise a non-zero value is returned.
+int set_iface_addr(const char *ip, const char *netmask) {
+	int sockfd;
+	struct ifreq ifr;
+	struct sockaddr_in *sin;
+	int ret = 0;
+
+	if (!ip || !netmask) {
+		fprintf(stderr, "set_iface_addr: NULL argument\n");
+		return 1;
+	}
+
+	sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+	if (sockfd < 0) {
+		perror("socket");
+		return 1;
+	}
+
+	memset(&ifr, 0, sizeof(ifr));
+	snprintf(ifr.ifr_name, IFNAMSIZ, "%s", ETH0_IF);
+
+	// Set IP address
+	sin = (struct sockaddr_in *)&ifr.ifr_addr;
+	sin->sin_len = sizeof(struct sockaddr_in);
+	sin->sin_family = AF_INET;
+	ret = inet_pton(AF_INET, ip, &sin->sin_addr);
+	if (ret != 1) {
+		fprintf(stderr, "Invalid IP address: %s\n", ip);
+		close(sockfd);
+		return 1;
+	}
+
+	DEBUG_PRINTF("Setting IP %s on %s\n", ip, ETH0_IF);
+	ret = ioctl(sockfd, SIOCSIFADDR, &ifr);
+	if (ret < 0) {
+		perror("ioctl SIOCSIFADDR");
+		close(sockfd);
+		return 1;
+	}
+
+	// Set netmask
+	memset(&ifr.ifr_addr, 0, sizeof(ifr.ifr_addr));
+	sin = (struct sockaddr_in *)&ifr.ifr_addr;
+	sin->sin_len = sizeof(struct sockaddr_in);
+	sin->sin_family = AF_INET;
+	ret = inet_pton(AF_INET, netmask, &sin->sin_addr);
+	if (ret != 1) {
+		fprintf(stderr, "Invalid netmask: %s\n", netmask);
+		close(sockfd);
+		return 1;
+	}
+
+	DEBUG_PRINTF("Setting netmask %s on %s\n", netmask, ETH0_IF);
+	ret = ioctl(sockfd, SIOCSIFNETMASK, &ifr);
+	if (ret < 0) {
+		perror("ioctl SIOCSIFNETMASK");
+		close(sockfd);
+		return 1;
+	}
+
+	// Bring the interface up
+	memset(&ifr.ifr_addr, 0, sizeof(ifr.ifr_addr));
+	snprintf(ifr.ifr_name, IFNAMSIZ, "%s", ETH0_IF);
+	ret = ioctl(sockfd, SIOCGIFFLAGS, &ifr);
+	if (ret < 0) {
+		perror("ioctl SIOCGIFFLAGS");
+		close(sockfd);
+		return 1;
+	}
+
+	ifr.ifr_flags |= IFF_UP | IFF_RUNNING;
+	ret = ioctl(sockfd, SIOCSIFFLAGS, &ifr);
+	if (ret < 0) {
+		perror("ioctl SIOCSIFFLAGS");
+		close(sockfd);
+		return 1;
+	}
+
+	DEBUG_PRINTF("Interface %s is up with %s/%s\n", ETH0_IF, ip, netmask);
+	close(sockfd);
+	return 0;
+}

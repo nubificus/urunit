@@ -63,10 +63,17 @@ struct process_config {
 	char     *wdir;
 };
 
+struct network_config {
+	char *ip;
+	char *gw;
+	char *mask;
+};
+
 struct app_exec_config {
 	char	 **envs;
 	char	 *path_env;
 	struct process_config *pr_conf;
+	struct network_config *net_conf;
 	struct block_config **blk_conf;
 };
 
@@ -504,6 +511,76 @@ struct process_config *parse_process_config(char **string_area, size_t max_sz) {
 	return NULL;
 }
 
+// parse_network_config: Parses a list with the following format:
+// UNS
+// IP:<IPv4>
+// GW:<Gateway>
+// MSK:<Network mask>
+// UNE
+// It is important to note, that this function will alter the given list,
+// replacing the new line characters with the end of string '\0' character.
+// The funtion returns a dynamically allocated memory and the caller is
+// responsible to free that memory.
+//
+// Arguments:
+// 1. string_area:	The list with the aformentioned format.
+// 2. max_sz:		The max possible size of the list.
+//
+// Return value:
+// On success it returns a pointer to a dynamically allocated memory that
+// contains a network_config struct filled with the information
+// from the configuration.
+// Otherwise, NULL is returned
+struct network_config *parse_network_config(char **string_area, size_t max_sz) {
+	struct network_config *conf = NULL;
+	char *tmp_field = NULL;
+
+	conf = malloc(sizeof(struct network_config));
+	if (!conf) {
+		fprintf(stderr, "Failed to allocate memory for network config\n");
+		return NULL;
+	}
+	memset(conf, 0, sizeof(struct network_config));
+	conf->wdir = NULL; // Sanity
+
+	tmp_field = strtok(*string_area, "\n");
+	// Discard the first string since it is the special string "UNS"
+	// Also, it is safe to call strtok, even if there was no '\n', since it will
+	// return NULL again.
+	tmp_field = strtok(NULL, "\n");
+	while (tmp_field && ((size_t)(tmp_field - *string_area) < max_sz)) {
+		int ret = 0;
+
+		if (memcmp(tmp_field, "IP", 2) == 0) {
+			ret = get_string_val(tmp_field, &(conf->ip));
+			if (ret != 0) {
+				fprintf(stderr, "Failed to retreive IP information from %s\n", tmp_field);
+				break;
+			}
+		} else 	if (memcmp(tmp_field, "GW", 2) == 0) {
+			ret = get_string_val(tmp_field, &(conf->gw));
+			if (ret != 0) {
+				fprintf(stderr, "Failed to retreive GW information from %s\n", tmp_field);
+				break;
+			}
+		} else 	if (memcmp(tmp_field, "MSK", 3) == 0) {
+			ret = get_string_val(tmp_field, &(conf->mask));
+			if (ret != 0) {
+				fprintf(stderr, "Failed to retreive MSK information from %s\n", tmp_field);
+				break;
+			}
+		} else 	if (memcmp(tmp_field, "UNE", 3) == 0) {
+			*string_area = tmp_field + 4; // 4 bytes for the "UNE" string
+			return conf;
+		}
+
+		tmp_field = strtok(NULL, "\n");
+	}
+
+	free(conf);
+	return NULL;
+}
+
 // parse_block_config Parses a list with the following format:
 // UBS
 // ID: <serial_id>
@@ -652,6 +729,7 @@ struct app_exec_config *get_config_from_file(char *file, char **sbuf) {
 	char *path_env = NULL;
 	struct app_exec_config *econf = NULL;
 	struct process_config *pconf = NULL;
+	struct network_config *nconf = NULL;
 	struct block_config **bconf = NULL;
 	char *conf_area = NULL;
 
@@ -731,6 +809,28 @@ struct app_exec_config *get_config_from_file(char *file, char **sbuf) {
 		size -= conf_area - init_conf_area;
 	}
 
+	DEBUG_PRINT("Checking for network configuration\n");
+	// Check if the special string "UNS" is present
+	// which means that now starts the configuration for the network
+	if (memcmp(conf_area, "UNS", 3) == 0) {
+		char *init_conf_area = conf_area;
+		nconf = parse_network_config(&conf_area, size);
+		if (!nconf ) {
+			fprintf(stderr, "Warning: No configuration for network was found\n");
+		}
+		// If the list was properly formatted, ending with "UNE"
+		// then string_area should differ from init_string_area
+		// Otherwise, the list was not properly formatted and
+		// we abort the parsing.
+		if (conf_area == init_conf_area) {
+			fprintf(stderr, "Invalid format of network configuration\n");
+			goto get_env_vars_error_free;
+		}
+		// Reduce the size of the config by the bytes parsed
+		// for the environment variables list.
+		size -= conf_area - init_conf_area;
+	}
+
 	econf = malloc(sizeof(struct app_exec_config));
 	if (!econf) {
 		fprintf(stderr, "Could not allocate memory for app exec config struct\n");
@@ -742,6 +842,7 @@ struct app_exec_config *get_config_from_file(char *file, char **sbuf) {
 	econf->path_env = path_env;
 	econf->pr_conf = pconf;
 	econf->blk_conf = bconf;
+	econf->net_conf = nconf;
 	return econf;
 
 get_env_vars_error_free:
@@ -971,6 +1072,11 @@ int child_func(char *argv[]) {
 		ret = mount_block_vols(app_config->blk_conf);
 		if (ret != 0) {
 			fprintf(stderr, "Failed to mount block volumes\n");
+			goto child_func_free;
+		}
+		ret = set_iface_addr(app_config->net_conf->ip, app_config->net_conf->mask);
+		if (ret != 0) {
+			fprintf(stderr, "Failed to set the network configuration\n");
 			goto child_func_free;
 		}
 		ret = setup_exec_env(app_config->pr_conf);
