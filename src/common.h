@@ -54,7 +54,11 @@ int find_vblock_device_by_order(const uint32_t n, char *device_path);
 int find_vblock_device_by_serial(const char *target_serial, char *device_path);
 int mount_special_fs();
 int mount_block_vols(struct block_config **vols);
+#if defined(__linux__)
 int set_default_route();
+#else
+int set_default_route(const char *gateway_ip);
+#endif
 void unmount_external();
 int set_subreaper();
 void request_reboot();

@@ -184,6 +184,7 @@ char *read_file_and_size(char *file, size_t *size) {
 	struct stat st = { 0 };
 	int ret = 0;
 	char *buf = NULL;
+	off_t file_size = 0;
 
 	DEBUG_PRINTF("Read configuration file %s\n", file);
 	fp = fopen(file, "rb");
@@ -199,16 +200,30 @@ char *read_file_and_size(char *file, size_t *size) {
 		perror("Getting configuration file size");
 		goto exit_read_file;
 	}
-	DEBUG_PRINTF("Total size of configuration file %ld\n", st.st_size);
+	if (S_ISBLK(st.st_mode)) {
+		off_t end = lseek(fileno(fp), 0, SEEK_END);
+		if (end < 0) {
+			perror("lseek to end of device");
+			goto exit_read_file;
+		}
+		if (lseek(fileno(fp), 0, SEEK_SET) < 0) {
+			perror("lseek to start of device");
+			goto exit_read_file;
+		}
+		file_size = end;
+	} else {
+		file_size = st.st_size;
+	}
+	DEBUG_PRINTF("Total size of configuration file %ld\n", file_size);
 
 	// Make sure to read the whole file in one buffer.
-	buf = read_exact_size(fp, st.st_size);
+	buf = read_exact_size(fp, file_size);
 	if (!buf) {
 		fprintf(stderr, "Could not read whole configuration file\n");
 		goto exit_read_file;
 	}
 	DEBUG_PRINTF("Contents of configuration file\n%s\n", buf);
-	*size = st.st_size;
+	*size = file_size;
 
 exit_read_file:
 	fclose(fp);
@@ -921,6 +936,10 @@ int child_func(char *argv[]) {
 	char *config_buf = NULL;
 	struct app_exec_config *app_config = NULL;
 	int ret = 0;
+#if defined(__FreeBSD__)
+	// TODO: Discover it
+	char freebsd_config_path[] = "/dev/vtbd1";
+#endif
 
 	DEBUG_PRINT("Isolating child\n");
 	// Put the child in a process group and
@@ -929,8 +948,12 @@ int child_func(char *argv[]) {
 		return 1;
 	}
 
+#if defined(__linux__)
 	// Check if we need to read any configuration for the app execution
 	config_file = getenv("URUNIT_CONFIG");
+#else
+	config_file = freebsd_config_path;
+#endif;
 	if (config_file) {
 		// We need to mount sysfs to read the data from retained initrd
 		ret = mount_special_fs();
@@ -1151,6 +1174,8 @@ int main(int argc, char *argv[]) {
 	pid_t app_pid;
 	int ret = 0;
 	int app_exitcode = -1;
+
+#if defined(__linux__)
 	char *should_set_def_route = NULL;
 
 	should_set_def_route = getenv("URUNIT_DEFROUTE");
@@ -1161,6 +1186,7 @@ int main(int argc, char *argv[]) {
 			fprintf(stderr, "Failed to set default route\n");
 		}
 	}
+#endif
 
 	DEBUG_PRINT("Setting subreaper\n");
 	ret = set_subreaper();

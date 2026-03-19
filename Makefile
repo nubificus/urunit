@@ -76,6 +76,8 @@ endif
 
 ifeq ($(TARGET_OS),Linux)
     URUNIT_SRC += ${SOURCE_DIR}/linux.c
+else ifeq ($(TARGET_OS),FreeBSD)
+    URUNIT_SRC += ${SOURCE_DIR}/freebsd.c
 endif
 
 # Main Building rules
