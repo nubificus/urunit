@@ -541,7 +541,9 @@ struct network_config *parse_network_config(char **string_area, size_t max_sz) {
 		return NULL;
 	}
 	memset(conf, 0, sizeof(struct network_config));
-	conf->wdir = NULL; // Sanity
+	conf->ip = NULL; // Sanity
+	conf->gw = NULL; // Sanity
+	conf->mask = NULL; // Sanity
 
 	tmp_field = strtok(*string_area, "\n");
 	// Discard the first string since it is the special string "UNS"
