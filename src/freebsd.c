@@ -451,7 +451,7 @@ void request_reboot(void) {
 int set_iface_addr(const char *ip, const char *netmask) {
 	int sockfd;
 	struct ifreq ifr;
-	struct sockaddr_in *sin;
+	struct in_aliasreq ifra;
 	int ret = 0;
 
 	if (!ip || !netmask) {
@@ -465,50 +465,43 @@ int set_iface_addr(const char *ip, const char *netmask) {
 		return 1;
 	}
 
-	memset(&ifr, 0, sizeof(ifr));
-	snprintf(ifr.ifr_name, IFNAMSIZ, "%s", ETH0_IF);
+	memset(&ifra, 0, sizeof(ifra));
+	snprintf(ifra.ifra_name, IFNAMSIZ, "%s", ETH0_IF);
 
 	// Set IP address
-	sin = (struct sockaddr_in *)&ifr.ifr_addr;
-	sin->sin_len = sizeof(struct sockaddr_in);
-	sin->sin_family = AF_INET;
-	ret = inet_pton(AF_INET, ip, &sin->sin_addr);
+	ifra.ifra_addr.sin_len = sizeof(struct sockaddr_in);
+	ifra.ifra_addr.sin_family = AF_INET;
+	ret = inet_pton(AF_INET, ip, &ifra.ifra_addr.sin_addr);
 	if (ret != 1) {
 		fprintf(stderr, "Invalid IP address: %s\n", ip);
 		close(sockfd);
 		return 1;
 	}
 
-	DEBUG_PRINTF("Setting IP %s on %s\n", ip, ETH0_IF);
-	ret = ioctl(sockfd, SIOCSIFADDR, &ifr);
-	if (ret < 0) {
-		perror("ioctl SIOCSIFADDR");
-		close(sockfd);
-		return 1;
-	}
-
 	// Set netmask
-	memset(&ifr.ifr_addr, 0, sizeof(ifr.ifr_addr));
-	sin = (struct sockaddr_in *)&ifr.ifr_addr;
-	sin->sin_len = sizeof(struct sockaddr_in);
-	sin->sin_family = AF_INET;
-	ret = inet_pton(AF_INET, netmask, &sin->sin_addr);
+	ifra.ifra_mask.sin_len = sizeof(struct sockaddr_in);
+	ifra.ifra_mask.sin_family = AF_INET;
+	ret = inet_pton(AF_INET, netmask, &ifra.ifra_mask.sin_addr);
 	if (ret != 1) {
 		fprintf(stderr, "Invalid netmask: %s\n", netmask);
 		close(sockfd);
 		return 1;
 	}
 
-	DEBUG_PRINTF("Setting netmask %s on %s\n", netmask, ETH0_IF);
-	ret = ioctl(sockfd, SIOCSIFNETMASK, &ifr);
+	// Leave broadcast as zero — the kernel will compute it
+	ifra.ifra_broadaddr.sin_len = sizeof(struct sockaddr_in);
+	ifra.ifra_broadaddr.sin_family = AF_INET;
+
+	DEBUG_PRINTF("Setting IP %s/%s on %s\n", ip, netmask, ETH0_IF);
+	ret = ioctl(sockfd, SIOCAIFADDR, &ifra);
 	if (ret < 0) {
-		perror("ioctl SIOCSIFNETMASK");
+		perror("ioctl SIOCAIFADDR");
 		close(sockfd);
 		return 1;
 	}
 
 	// Bring the interface up
-	memset(&ifr.ifr_addr, 0, sizeof(ifr.ifr_addr));
+	memset(&ifr, 0, sizeof(ifr));
 	snprintf(ifr.ifr_name, IFNAMSIZ, "%s", ETH0_IF);
 	ret = ioctl(sockfd, SIOCGIFFLAGS, &ifr);
 	if (ret < 0) {
@@ -525,7 +518,7 @@ int set_iface_addr(const char *ip, const char *netmask) {
 		return 1;
 	}
 
-	DEBUG_PRINTF("Interface %s is up with %s/%s\n", ETH0_IF, ip, netmask);
+	DEBUG_PRINTF("Interface %s is up with %s/%s\n", iface, ip, netmask);
 	close(sockfd);
 	return 0;
 }
