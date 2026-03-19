@@ -204,7 +204,7 @@ char *read_file_and_size(char *file, size_t *size) {
 		perror("Getting configuration file size");
 		goto exit_read_file;
 	}
-	if (S_ISBLK(st.st_mode)) {
+	if (S_ISBLK(st.st_mode) || S_ISCHR(st.st_mode)) {
 		off_t end = lseek(fileno(fp), 0, SEEK_END);
 		if (end < 0) {
 			perror("lseek to end of device");
