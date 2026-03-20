@@ -736,6 +736,55 @@ get_env_vars_error_free:
 	return NULL;
 }
 
+// load_app_config: Reads the urunit configuration, if any. The configuration
+// file is given with the URUNIT_CONFIG environment variable or, when the
+// guest passes boot parameters through the kernel environment (FreeBSD), with
+// the URUNIT_CONFIG kernel environment variable.
+//
+// Arguments:
+// 1. config:		Will hold the parsed configuration, or stay untouched if
+//			there is no configuration file.
+// 2. config_buf:	Will hold the backing buffer of the configuration, which
+//			the caller is responsible to free.
+//
+// Return value:
+// 0 if there is no configuration or it was loaded successfully.
+// Otherwise 1 is returned.
+int load_app_config(struct app_exec_config **config, char **config_buf) {
+	char *config_file = NULL;
+	int ret = 0;
+	uint8_t free_boot_var = 0;
+
+	config_file = getenv("URUNIT_CONFIG");
+	if (!config_file) {
+		config_file = get_boot_var("URUNIT_CONFIG");
+		free_boot_var = 1;
+	}
+	if (!config_file) {
+		DEBUG_PRINT("No configuration file\n");
+		ret = 0;
+		goto exit_load_app_config;
+	}
+
+	// We need to mount sysfs to read the data from retained initrd
+	ret = mount_special_fs();
+	if (ret != 0) {
+		fprintf(stderr, "Failed to mount special filesystems\n");
+		ret = 1;
+		goto exit_load_app_config;
+	}
+	*config = get_config_from_file(config_file, config_buf);
+	if (!*config) {
+		fprintf(stderr, "Failed to read the configuration from %s\n", config_file);
+		ret = 1;
+	}
+
+exit_load_app_config:
+	if (free_boot_var)
+		free(config_file);
+	return ret;
+}
+
 // manual_execvpe: Tries to implement in a simple way execvpe, since execvpe is
 // only supported by glibc. The rational is to combine every path in env_path
 // (which is the PATH) with the file_bin (the executable) and try to execve.
@@ -923,9 +972,8 @@ int setup_exec_env(struct process_config *process_conf) {
 }
 
 int child_func(char *argv[]) {
-	char *config_file = NULL;
-	char *config_buf = NULL;
 	struct app_exec_config *app_config = NULL;
+	char *app_config_buf = NULL;
 	int ret = 0;
 
 	DEBUG_PRINT("Isolating child\n");
@@ -935,16 +983,9 @@ int child_func(char *argv[]) {
 		return 1;
 	}
 
-	// Check if we need to read any configuration for the app execution
-	config_file = getenv("URUNIT_CONFIG");
-	if (config_file) {
-		// We need to mount sysfs to read the data from retained initrd
-		ret = mount_special_fs();
-		if (ret != 0) {
-			fprintf(stderr, "Failed to mount special filesystems\n");
-			return 1;
-		}
-		app_config = get_config_from_file(config_file, &config_buf);
+	if (load_app_config(&app_config, &app_config_buf) != 0) {
+		fprintf(stderr, "Failed to load the configuration\n");
+		return 1;
 	}
 	if (app_config) {
 		ret = mount_block_vols(app_config->blk_conf);
@@ -964,10 +1005,12 @@ int child_func(char *argv[]) {
 	}
 	// If we returned something went wrong
 child_func_free:
-	free(config_buf);
-	free(app_config->envs);
-	free(app_config->pr_conf);
-	free(app_config);
+	if (app_config) {
+		free(app_config->envs);
+		free(app_config->pr_conf);
+		free(app_config);
+	}
+	free(app_config_buf);
 
 	return ret;
 }
@@ -1158,6 +1201,7 @@ int main(int argc, char *argv[]) {
 	int ret = 0;
 	int app_exitcode = -1;
 	char *should_set_def_route = NULL;
+	uint8_t free_boot_var = 0;
 
 	// When started by the kernel as init we may have no console yet.
 	setup_console();
@@ -1167,12 +1211,19 @@ int main(int argc, char *argv[]) {
 	remount_root_rw();
 
 	should_set_def_route = getenv("URUNIT_DEFROUTE");
+	if (!should_set_def_route) {
+		should_set_def_route = get_boot_var("URUNIT_DEFROUTE");
+		free_boot_var = 1;
+	}
 	if (should_set_def_route) {
 		DEBUG_PRINT("URUNIT_DEFROUTE was set\n");
 		ret = set_default_route();
 		if (ret != 0) {
 			fprintf(stderr, "Failed to set default route\n");
 		}
+	}
+	if (free_boot_var) {
+		free(should_set_def_route);
 	}
 
 	DEBUG_PRINT("Setting subreaper\n");
