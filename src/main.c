@@ -42,6 +42,7 @@
 
 #include <sys/wait.h>
 #include <sys/stat.h>
+#include <sys/resource.h>
 
 #include <errno.h>
 #include <string.h>
@@ -57,6 +58,9 @@ struct process_config {
 	uint32_t uid;
 	uint32_t gid;
 	char     *wdir;
+	struct rlimit *rlimits;      // array of rlimit structs
+	int      *rlimit_resources;  // parallel array: the RLIMIT_* int constants
+	size_t   rlimits_count;
 };
 
 struct app_exec_config {
@@ -415,11 +419,95 @@ int get_string_val(char *str, char **value) {
 	return -1;
 }
 
+// rlimit_type_from_str: Converts an OCI rlimit type string (e.g. "RLIMIT_NOFILE")
+// to the corresponding POSIX integer constant.
+//
+// Return value: the integer constant, or -1 if unknown.
+static int rlimit_type_from_str(const char *s) {
+	struct { const char *name; int val; } table[] = {
+		{ "RLIMIT_AS",         RLIMIT_AS },
+		{ "RLIMIT_CORE",       RLIMIT_CORE },
+		{ "RLIMIT_CPU",        RLIMIT_CPU },
+		{ "RLIMIT_DATA",       RLIMIT_DATA },
+		{ "RLIMIT_FSIZE",      RLIMIT_FSIZE },
+		{ "RLIMIT_LOCKS",      RLIMIT_LOCKS },
+		{ "RLIMIT_MEMLOCK",    RLIMIT_MEMLOCK },
+		{ "RLIMIT_MSGQUEUE",   RLIMIT_MSGQUEUE },
+		{ "RLIMIT_NICE",       RLIMIT_NICE },
+		{ "RLIMIT_NOFILE",     RLIMIT_NOFILE },
+		{ "RLIMIT_NPROC",      RLIMIT_NPROC },
+		{ "RLIMIT_RSS",        RLIMIT_RSS },
+		{ "RLIMIT_RTPRIO",     RLIMIT_RTPRIO },
+		{ "RLIMIT_RTTIME",     RLIMIT_RTTIME },
+		{ "RLIMIT_SIGPENDING", RLIMIT_SIGPENDING },
+		{ "RLIMIT_STACK",      RLIMIT_STACK },
+	};
+	for (size_t i = 0; i < sizeof(table)/sizeof(table[0]); i++) {
+		if (strcmp(s, table[i].name) == 0)
+			return table[i].val;
+	}
+	return -1;
+}
+
+// get_rlimit_vals: Parses "RLIMIT:<type>:<soft>:<hard>" into resource int,
+// soft limit, and hard limit.
+//
+// Return value: 0 on success, -1 on failure.
+static int get_rlimit_vals(char *str, int *resource, rlim_t *soft, rlim_t *hard) {
+	// str is "RLIMIT:<type>:<soft>:<hard>"
+	// Skip the leading "RLIMIT:" prefix (7 bytes)
+	char *p = str + 7;
+	char *colon1 = strchr(p, ':');
+	char *colon2 = NULL;
+
+	if (!colon1) {
+		fprintf(stderr, "Malformed RLIMIT line (missing type/soft separator): %s\n", str);
+		return -1;
+	}
+	*colon1 = '\0';
+	colon2 = strchr(colon1 + 1, ':');
+	if (!colon2) {
+		fprintf(stderr, "Malformed RLIMIT line (missing soft/hard separator): %s\n", str);
+		*colon1 = ':'; // restore
+		return -1;
+	}
+	*colon2 = '\0';
+
+	*resource = rlimit_type_from_str(p);
+	if (*resource < 0) {
+		fprintf(stderr, "Unknown rlimit type: %s\n", p);
+		*colon1 = ':'; *colon2 = ':';
+		return -1;
+	}
+
+	char *end = NULL;
+	errno = 0;
+	unsigned long long soft_val = strtoull(colon1 + 1, &end, 10);
+	if (errno == ERANGE || *end != '\0') {
+		fprintf(stderr, "Invalid soft rlimit value: %s\n", colon1 + 1);
+		*colon1 = ':'; *colon2 = ':';
+		return -1;
+	}
+	errno = 0;
+	unsigned long long hard_val = strtoull(colon2 + 1, &end, 10);
+	if (errno == ERANGE || *end != '\0') {
+		fprintf(stderr, "Invalid hard rlimit value: %s\n", colon2 + 1);
+		*colon1 = ':'; *colon2 = ':';
+		return -1;
+	}
+
+	*soft = (rlim_t)soft_val;
+	*hard = (rlim_t)hard_val;
+	*colon1 = ':'; *colon2 = ':'; // restore (strtok already NUL-terminated line)
+	return 0;
+}
+
 // parse_process_config: Parses a list with the following format:
 // UCS
 // UID:<uid>
 // GID:<gid>
 // WD:<working directory>
+// RLIMIT:<type>:<soft>:<hard>
 // UCE
 // It is important to note, that this function will alter the given list,
 // replacing the new line characters with the end of string '\0' character.
@@ -427,8 +515,8 @@ int get_string_val(char *str, char **value) {
 // responsible to free that memory.
 //
 // Arguments:
-// 1. string_area:	The list with in the aformentioned format.
-// 2. max_sz:		The max possible size of the list.
+// 1. string_area:  The list with in the aformentioned format.
+// 2. max_sz:       The max possible size of the list.
 //
 // Return value:
 // On success it returns a pointer to a dynamically allocated memory that
@@ -438,6 +526,7 @@ int get_string_val(char *str, char **value) {
 struct process_config *parse_process_config(char **string_area, size_t max_sz) {
 	struct process_config *conf = NULL;
 	char *tmp_field = NULL;
+	size_t total_rlimits = 0;
 
 	conf = malloc(sizeof(struct process_config));
 	if (!conf) {
@@ -446,6 +535,46 @@ struct process_config *parse_process_config(char **string_area, size_t max_sz) {
 	}
 	memset(conf, 0, sizeof(struct process_config));
 	conf->wdir = NULL; // Sanity
+	conf->rlimits = NULL;
+	conf->rlimit_resources = NULL;
+	conf->rlimits_count = 0;
+
+	// Pre-count how many RLIMIT: lines are in the UCS block so we can
+	// allocate the arrays exactly once instead of using realloc.
+	total_rlimits = 0;
+	{
+		char *scan = *string_area;
+		size_t remaining = max_sz;
+		while (remaining > 7 && *scan != '\0') {
+			if (memcmp(scan, "RLIMIT:", 7) == 0)
+				total_rlimits++;
+			// Advance to next line
+			while (remaining > 0 && *scan != '\n' && *scan != '\0') {
+				scan++;
+				remaining--;
+			}
+			if (remaining > 0 && *scan == '\n') {
+				scan++;
+				remaining--;
+			}
+		}
+	}
+
+	if (total_rlimits > 0) {
+		conf->rlimits = malloc(total_rlimits * sizeof(struct rlimit));
+		if (!conf->rlimits) {
+			fprintf(stderr, "Failed to allocate memory for rlimits array\n");
+			free(conf);
+			return NULL;
+		}
+		conf->rlimit_resources = malloc(total_rlimits * sizeof(int));
+		if (!conf->rlimit_resources) {
+			fprintf(stderr, "Failed to allocate memory for rlimit_resources array\n");
+			free(conf->rlimits);
+			free(conf);
+			return NULL;
+		}
+	}
 
 	tmp_field = strtok(*string_area, "\n");
 	// Discard the first string since it is the special string "UCS"
@@ -461,19 +590,32 @@ struct process_config *parse_process_config(char **string_area, size_t max_sz) {
 				fprintf(stderr, "Failed to retreive UID information from %s\n", tmp_field);
 				break;
 			}
-		} else 	if (memcmp(tmp_field, "GID", 3) == 0) {
+		} else if (memcmp(tmp_field, "GID", 3) == 0) {
 			ret = get_uint_val(tmp_field, &(conf->gid));
 			if (ret != 0) {
 				fprintf(stderr, "Failed to retreive GID information from %s\n", tmp_field);
 				break;
 			}
-		} else 	if (memcmp(tmp_field, "WD", 2) == 0) {
+		} else if (memcmp(tmp_field, "WD", 2) == 0) {
 			ret = get_string_val(tmp_field, &(conf->wdir));
 			if (ret != 0) {
 				fprintf(stderr, "Failed to retreive WD information from %s\n", tmp_field);
 				break;
 			}
-		} else 	if (memcmp(tmp_field, "UCE", 3) == 0) {
+		} else if (memcmp(tmp_field, "RLIMIT:", 7) == 0) {
+			int resource = 0;
+			rlim_t soft = 0, hard = 0;
+			ret = get_rlimit_vals(tmp_field, &resource, &soft, &hard);
+			if (ret != 0) {
+				fprintf(stderr, "Failed to parse RLIMIT line: %s\n", tmp_field);
+				break;
+			}
+			size_t n = conf->rlimits_count;
+			conf->rlimits[n].rlim_cur = soft;
+			conf->rlimits[n].rlim_max = hard;
+			conf->rlimit_resources[n] = resource;
+			conf->rlimits_count++;
+		} else if (memcmp(tmp_field, "UCE", 3) == 0) {
 			*string_area = tmp_field + 4; // 4 bytes for the "UCE" string
 			return conf;
 		}
@@ -481,6 +623,10 @@ struct process_config *parse_process_config(char **string_area, size_t max_sz) {
 		tmp_field = strtok(NULL, "\n");
 	}
 
+	// We only reach here if parsing failed (UCE was never found).
+	// Clean up all allocated memory before returning NULL.
+	free(conf->rlimits);
+	free(conf->rlimit_resources);
 	free(conf);
 	return NULL;
 }
@@ -877,7 +1023,7 @@ manual_exec_exit:
 // the process_conf argument.
 //
 // Arguments:
-// 1. process_conf:	The config to apply with uid/gid and CWD.
+// 1. process_conf: The config to apply with uid/gid, CWD and rlimits.
 //
 // Return value:
 // On success 0 is returned.
@@ -888,6 +1034,22 @@ int setup_exec_env(struct process_config *process_conf) {
 	if (!process_conf) {
 		DEBUG_PRINT("Empty config, nothing to be done\n");
 		return 0;
+	}
+
+	// Apply rlimits before dropping privileges, because some rlimit
+	// types (e.g. RLIMIT_NOFILE) can only be raised while still root.
+	// After setuid() we may no longer have permission to raise hard limits.
+	for (size_t i = 0; i < process_conf->rlimits_count; i++) {
+		DEBUG_PRINTF("Setting rlimit resource %d soft=%lu hard=%lu\n",
+			process_conf->rlimit_resources[i],
+			(unsigned long)process_conf->rlimits[i].rlim_cur,
+			(unsigned long)process_conf->rlimits[i].rlim_max);
+		ret = setrlimit(process_conf->rlimit_resources[i],
+				&process_conf->rlimits[i]);
+		if (ret < 0) {
+			perror("set rlimit");
+			return 1;
+		}
 	}
 
 	DEBUG_PRINTF("Setting gid to %d\n", process_conf->gid);
@@ -959,9 +1121,13 @@ int child_func(char *argv[]) {
 	// If we returned something went wrong
 child_func_free:
 	free(config_buf);
-	free(app_config->envs);
-	free(app_config->pr_conf);
-	free(app_config);
+	if (app_config) {
+		free(app_config->envs);
+		free(app_config->pr_conf->rlimits);
+		free(app_config->pr_conf->rlimit_resources);
+		free(app_config->pr_conf);
+		free(app_config);
+	}
 
 	return ret;
 }
