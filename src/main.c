@@ -449,56 +449,52 @@ static int rlimit_type_from_str(const char *s) {
 	return -1;
 }
 
-// get_rlimit_vals: Parses "RLIMIT:<type>:<soft>:<hard>" into resource int,
-// soft limit, and hard limit.
+// get_rlim_val: Converts the value of a "KEY:VALUE" string to rlim_t. It is
+// similar to get_uint_val, but it parses a 64-bit value, so it can hold large
+// rlimit values, including RLIM_INFINITY.
 //
-// Return value: 0 on success, -1 on failure.
-static int get_rlimit_vals(char *str, int *resource, rlim_t *soft, rlim_t *hard) {
-	// str is "RLIMIT:<type>:<soft>:<hard>"
-	// Skip the leading "RLIMIT:" prefix (7 bytes)
-	char *p = str + 7;
-	char *colon1 = strchr(p, ':');
-	char *colon2 = NULL;
-
-	if (!colon1) {
-		fprintf(stderr, "Malformed RLIMIT line (missing type/soft separator): %s\n", str);
-		return -1;
-	}
-	*colon1 = '\0';
-	colon2 = strchr(colon1 + 1, ':');
-	if (!colon2) {
-		fprintf(stderr, "Malformed RLIMIT line (missing soft/hard separator): %s\n", str);
-		*colon1 = ':'; // restore
-		return -1;
-	}
-	*colon2 = '\0';
-
-	*resource = rlimit_type_from_str(p);
-	if (*resource < 0) {
-		fprintf(stderr, "Unknown rlimit type: %s\n", p);
-		*colon1 = ':'; *colon2 = ':';
-		return -1;
-	}
-
+// Arguments:
+// 1. str:	The string to convert in the form "KEY:VALUE".
+// 2. value:	A pointer to rlim_t where the converted value will get stored.
+//
+// Return value:
+// On success 0 is returned and value contains the converted value.
+// On failure, -1 is returned and value stays intact.
+int get_rlim_val(char *str, rlim_t *value) {
+	size_t str_sz = strlen(str);
+	char *val_str = strchr(str, ':');
+	unsigned long long val = 0;
 	char *end = NULL;
-	errno = 0;
-	unsigned long long soft_val = strtoull(colon1 + 1, &end, 10);
-	if (errno == ERANGE || *end != '\0') {
-		fprintf(stderr, "Invalid soft rlimit value: %s\n", colon1 + 1);
-		*colon1 = ':'; *colon2 = ':';
-		return -1;
-	}
-	errno = 0;
-	unsigned long long hard_val = strtoull(colon2 + 1, &end, 10);
-	if (errno == ERANGE || *end != '\0') {
-		fprintf(stderr, "Invalid hard rlimit value: %s\n", colon2 + 1);
-		*colon1 = ':'; *colon2 = ':';
+
+	if (val_str == NULL) {
+		// We could not find the beginning of the value string.
+		fprintf(stderr, "Failed to find ':' character in %s\n", str);
 		return -1;
 	}
 
-	*soft = (rlim_t)soft_val;
-	*hard = (rlim_t)hard_val;
-	*colon1 = ':'; *colon2 = ':'; // restore (strtok already NUL-terminated line)
+	// strchr will return a pointer to ':', but we need to move passed
+	// ':', hence +1 character.
+	if (val_str + 1 >= str + str_sz) {
+		// We can not go over the string. Something is wrong
+		fprintf(stderr, "Failed to find value after ':' in %s\n", str);
+		return -1;
+	}
+	val_str++;
+
+	// strtoull can take care of spaces.
+	errno = 0;
+	val = strtoull(val_str, &end, 10);
+	if (errno == ERANGE) {
+		perror("Convert string to rlim_t");
+		return -1;
+	}
+	if (*end != '\0') {
+		fprintf(stderr, "Failed to convert %s to rlim_t. Got trailing character %c\n", val_str, *end);
+		return -1;
+	}
+
+	*value = (rlim_t)val;
+
 	return 0;
 }
 
@@ -507,8 +503,9 @@ static int get_rlimit_vals(char *str, int *resource, rlim_t *soft, rlim_t *hard)
 // UID:<uid>
 // GID:<gid>
 // WD:<working directory>
-// RLIMIT:<type>:<soft>:<hard>
 // UCE
+// The resource limits (rlimits) are passed in a separate "RLS" block and are
+// parsed by parse_rlimit_config.
 // It is important to note, that this function will alter the given list,
 // replacing the new line characters with the end of string '\0' character.
 // The funtion returns a dynamically allocated memory and the caller is
@@ -526,7 +523,6 @@ static int get_rlimit_vals(char *str, int *resource, rlim_t *soft, rlim_t *hard)
 struct process_config *parse_process_config(char **string_area, size_t max_sz) {
 	struct process_config *conf = NULL;
 	char *tmp_field = NULL;
-	size_t total_rlimits = 0;
 
 	conf = malloc(sizeof(struct process_config));
 	if (!conf) {
@@ -538,43 +534,6 @@ struct process_config *parse_process_config(char **string_area, size_t max_sz) {
 	conf->rlimits = NULL;
 	conf->rlimit_resources = NULL;
 	conf->rlimits_count = 0;
-
-	// Pre-count how many RLIMIT: lines are in the UCS block so we can
-	// allocate the arrays exactly once instead of using realloc.
-	total_rlimits = 0;
-	{
-		char *scan = *string_area;
-		size_t remaining = max_sz;
-		while (remaining > 7 && *scan != '\0') {
-			if (memcmp(scan, "RLIMIT:", 7) == 0)
-				total_rlimits++;
-			// Advance to next line
-			while (remaining > 0 && *scan != '\n' && *scan != '\0') {
-				scan++;
-				remaining--;
-			}
-			if (remaining > 0 && *scan == '\n') {
-				scan++;
-				remaining--;
-			}
-		}
-	}
-
-	if (total_rlimits > 0) {
-		conf->rlimits = malloc(total_rlimits * sizeof(struct rlimit));
-		if (!conf->rlimits) {
-			fprintf(stderr, "Failed to allocate memory for rlimits array\n");
-			free(conf);
-			return NULL;
-		}
-		conf->rlimit_resources = malloc(total_rlimits * sizeof(int));
-		if (!conf->rlimit_resources) {
-			fprintf(stderr, "Failed to allocate memory for rlimit_resources array\n");
-			free(conf->rlimits);
-			free(conf);
-			return NULL;
-		}
-	}
 
 	tmp_field = strtok(*string_area, "\n");
 	// Discard the first string since it is the special string "UCS"
@@ -602,19 +561,6 @@ struct process_config *parse_process_config(char **string_area, size_t max_sz) {
 				fprintf(stderr, "Failed to retreive WD information from %s\n", tmp_field);
 				break;
 			}
-		} else if (memcmp(tmp_field, "RLIMIT:", 7) == 0) {
-			int resource = 0;
-			rlim_t soft = 0, hard = 0;
-			ret = get_rlimit_vals(tmp_field, &resource, &soft, &hard);
-			if (ret != 0) {
-				fprintf(stderr, "Failed to parse RLIMIT line: %s\n", tmp_field);
-				break;
-			}
-			size_t n = conf->rlimits_count;
-			conf->rlimits[n].rlim_cur = soft;
-			conf->rlimits[n].rlim_max = hard;
-			conf->rlimit_resources[n] = resource;
-			conf->rlimits_count++;
 		} else if (memcmp(tmp_field, "UCE", 3) == 0) {
 			*string_area = tmp_field + 4; // 4 bytes for the "UCE" string
 			return conf;
@@ -625,10 +571,128 @@ struct process_config *parse_process_config(char **string_area, size_t max_sz) {
 
 	// We only reach here if parsing failed (UCE was never found).
 	// Clean up all allocated memory before returning NULL.
-	free(conf->rlimits);
-	free(conf->rlimit_resources);
 	free(conf);
 	return NULL;
+}
+
+// parse_rlimit_config: Parses a list with the following format:
+// RLS
+// NUM:<number of entries>
+// TYPE:<rlimit type>
+// SOFT:<soft limit>
+// HARD:<hard limit>
+// ...
+// RLE
+// The list begins with the number of entries (NUM), so the rlimit arrays can
+// be allocated exactly once. Each entry is described by three lines: TYPE,
+// SOFT and HARD. The parsed values are stored in the rlimits, rlimit_resources
+// and rlimits_count fields of the provided process_config. As with the other
+// parsers, it alters the given list, replacing the new line characters with
+// the end of string '\0' character.
+//
+// Arguments:
+// 1. string_area:	The list with the aforementioned format. On success this
+//			pointer moves past the "RLE" string.
+// 2. max_sz:		The maximum size of the area to look for the rlimit config.
+// 3. conf:		The process_config struct to populate with the rlimits.
+//
+// Return value:
+// On success 0 is returned and conf is populated with the rlimits.
+// On failure, -1 is returned.
+int parse_rlimit_config(char **string_area, size_t max_sz, struct process_config *conf) {
+	char *tmp_field = NULL;
+	uint32_t num = 0;
+	size_t idx = 0;
+
+	(void)max_sz;
+
+	tmp_field = strtok(*string_area, "\n");
+	// Discard the first string since it is the special string "RLS".
+	// The next line must be the number of rlimit entries.
+	tmp_field = strtok(NULL, "\n");
+	if (!tmp_field || memcmp(tmp_field, "NUM", 3) != 0) {
+		fprintf(stderr, "Expected NUM entry at the start of the rlimit list\n");
+		return -1;
+	}
+	if (get_uint_val(tmp_field, &num) != 0) {
+		fprintf(stderr, "Failed to read the number of rlimits\n");
+		return -1;
+	}
+	DEBUG_PRINTF("Found %u rlimit entries\n", num);
+
+	if (num > 0) {
+		conf->rlimits = malloc(num * sizeof(struct rlimit));
+		if (!conf->rlimits) {
+			fprintf(stderr, "Failed to allocate memory for rlimits array\n");
+			return -1;
+		}
+		conf->rlimit_resources = malloc(num * sizeof(int));
+		if (!conf->rlimit_resources) {
+			fprintf(stderr, "Failed to allocate memory for rlimit_resources array\n");
+			free(conf->rlimits);
+			conf->rlimits = NULL;
+			return -1;
+		}
+	}
+
+	// Each rlimit entry consists of three lines: TYPE, SOFT and HARD.
+	for (idx = 0; idx < num; idx++) {
+		char *type_line = strtok(NULL, "\n");
+		char *soft_line = strtok(NULL, "\n");
+		char *hard_line = strtok(NULL, "\n");
+		char *type_str = NULL;
+		int resource = 0;
+		rlim_t soft = 0;
+		rlim_t hard = 0;
+
+		if (!type_line || !soft_line || !hard_line) {
+			fprintf(stderr, "Incomplete rlimit entry at index %zu\n", idx);
+			goto parse_rlimit_error;
+		}
+		if (memcmp(type_line, "TYPE", 4) != 0 ||
+		    memcmp(soft_line, "SOFT", 4) != 0 ||
+		    memcmp(hard_line, "HARD", 4) != 0) {
+			fprintf(stderr, "Malformed rlimit entry at index %zu\n", idx);
+			goto parse_rlimit_error;
+		}
+		if (get_string_val(type_line, &type_str) != 0) {
+			fprintf(stderr, "Failed to read rlimit type from %s\n", type_line);
+			goto parse_rlimit_error;
+		}
+		resource = rlimit_type_from_str(type_str);
+		if (resource < 0) {
+			fprintf(stderr, "Unknown rlimit type: %s\n", type_str);
+			goto parse_rlimit_error;
+		}
+		if (get_rlim_val(soft_line, &soft) != 0 ||
+		    get_rlim_val(hard_line, &hard) != 0) {
+			fprintf(stderr, "Failed to read rlimit values for %s\n", type_str);
+			goto parse_rlimit_error;
+		}
+
+		conf->rlimits[idx].rlim_cur = soft;
+		conf->rlimits[idx].rlim_max = hard;
+		conf->rlimit_resources[idx] = resource;
+		conf->rlimits_count++;
+	}
+
+	// The list must end with the special string "RLE".
+	tmp_field = strtok(NULL, "\n");
+	if (!tmp_field || memcmp(tmp_field, "RLE", 3) != 0) {
+		fprintf(stderr, "Invalid format of rlimit list. \"RLE\" was not found\n");
+		goto parse_rlimit_error;
+	}
+	*string_area = tmp_field + 4; // 4 bytes for the "RLE" string
+
+	return 0;
+
+parse_rlimit_error:
+	free(conf->rlimits);
+	free(conf->rlimit_resources);
+	conf->rlimits = NULL;
+	conf->rlimit_resources = NULL;
+	conf->rlimits_count = 0;
+	return -1;
 }
 
 // parse_block_config Parses a list with the following format:
@@ -834,6 +898,37 @@ struct app_exec_config *get_config_from_file(char *file, char **sbuf) {
 		}
 		// Reduce the size of the config by the bytes parsed
 		// for the environment variables list.
+		size -= conf_area - init_conf_area;
+	}
+
+	DEBUG_PRINT("Checking for resource limits configuration\n");
+	// Check if the special string "RLS" is present which means that now
+	// starts the configuration for the resource limits (rlimits). The rlimits
+	// belong to the process configuration, so they are stored in the same
+	// process_config struct that the "UCS" block produced.
+	if (memcmp(conf_area, "RLS", 3) == 0) {
+		char *init_conf_area = conf_area;
+		// In the unlikely case that no "UCS" block preceded the "RLS" block,
+		// allocate a zeroed process_config so the rlimits have a place to live.
+		if (!pconf) {
+			pconf = malloc(sizeof(struct process_config));
+			if (!pconf) {
+				fprintf(stderr, "Could not allocate memory for process config\n");
+				goto get_env_vars_error_free;
+			}
+			memset(pconf, 0, sizeof(struct process_config));
+		}
+		// Extract the resource limits configuration.
+		if (parse_rlimit_config(&conf_area, size, pconf) != 0) {
+			fprintf(stderr, "Invalid format of resource limits configuration\n");
+			goto get_env_vars_error_free;
+		}
+		// If the list was properly formatted, ending with "RLE"
+		// then conf_area should differ from init_conf_area.
+		if (conf_area == init_conf_area) {
+			fprintf(stderr, "Invalid format of resource limits configuration\n");
+			goto get_env_vars_error_free;
+		}
 		size -= conf_area - init_conf_area;
 	}
 
