@@ -28,6 +28,8 @@
 #include <fcntl.h>
 #include <dirent.h>
 #include <linux/input.h>
+#include <signal.h>
+#include <sys/signalfd.h>
 
 #include "common.h"
 
@@ -427,4 +429,43 @@ int open_power_button(void) {
 	closedir(d);
 	DEBUG_PRINT("No power button input device found\n");
 	return -1;
+}
+
+// setup_signalfd: Block SIGCHLD, SIGINT and SIGTERM in the calling thread and
+// return a signalfd that delivers them as readable events. Must be called
+// before forking the app, so that no SIGCHLD is missed. The fd is non-blocking
+// (drain until EAGAIN) and close-on-exec.
+//
+// Return value:
+// The signalfd on success, or -1 on error.
+int setup_signalfd(void) {
+	sigset_t mask;
+	int fd = 0;
+
+	sigemptyset(&mask);
+	sigaddset(&mask, SIGCHLD);
+	sigaddset(&mask, SIGINT);
+	sigaddset(&mask, SIGTERM);
+
+	if (sigprocmask(SIG_BLOCK, &mask, NULL) < 0) {
+		perror("sigprocmask block");
+		return -1;
+	}
+
+	fd = signalfd(-1, &mask, SFD_CLOEXEC | SFD_NONBLOCK);
+	if (fd < 0) {
+		perror("signalfd");
+		return -1;
+	}
+	return fd;
+}
+
+// disable_cad: Ask the kernel to deliver a guest Ctrl+Alt+Del as SIGINT to PID 1
+// instead of triggering an immediate reboot. Firecracker's SendCtrlAltDel
+// (x86 only) reaches the guest this way. No observable effect on arm64/QEMU.
+void disable_cad(void) {
+	if (syscall(SYS_reboot, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2,
+		    LINUX_REBOOT_CMD_CAD_OFF, NULL) < 0) {
+		perror("reboot CAD_OFF");
+	}
 }

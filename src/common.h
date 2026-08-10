@@ -59,5 +59,7 @@ void unmount_external();
 int set_subreaper();
 void request_reboot();
 int open_power_button(void);
+int setup_signalfd(void);
+void disable_cad(void);
 
 #endif // COMMON_H
