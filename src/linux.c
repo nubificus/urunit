@@ -25,6 +25,11 @@
 #include <sys/ioctl.h>
 #include <linux/route.h>
 #include <netinet/in.h>
+#include <fcntl.h>
+#include <dirent.h>
+#include <linux/input.h>
+#include <signal.h>
+#include <sys/signalfd.h>
 
 #include "common.h"
 
@@ -370,4 +375,97 @@ int set_subreaper() {
 void request_reboot() {
 	syscall(SYS_reboot, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2,
 		LINUX_REBOOT_CMD_RESTART, NULL);
+}
+
+// has_key_power: Return 1 if the evdev device behind fd reports the KEY_POWER
+// key in its EV_KEY capability bitmap, 0 otherwise.
+static int has_key_power(int fd) {
+	unsigned long bits[(KEY_MAX / (8 * sizeof(unsigned long))) + 1];
+
+	memset(bits, 0, sizeof(bits));
+	if (ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(bits)), bits) < 0)
+		return 0;
+	return (bits[KEY_POWER / (8 * sizeof(unsigned long))]
+		>> (KEY_POWER % (8 * sizeof(unsigned long)))) & 1UL;
+}
+
+// open_power_button: Scan /dev/input/event* for the device that reports
+// KEY_POWER (the ACPI power button on x86, the gpio-keys button on arm64) and
+// return an open, non-blocking, close-on-exec fd for it.
+//
+// Return value:
+// The fd of the first matching device, or -1 if none is found.
+int open_power_button(void) {
+	DIR *d = NULL;
+	struct dirent *ent = NULL;
+	char path[PATH_MAX] = { 0 };
+
+	d = opendir("/dev/input");
+	if (!d) {
+		perror("opendir /dev/input");
+		return -1;
+	}
+
+	while ((ent = readdir(d)) != NULL) {
+		int fd = 0;
+		int ret = 0;
+
+		if (strncmp(ent->d_name, "event", 5) != 0)
+			continue;
+		ret = snprintf(path, sizeof(path), "/dev/input/%s", ent->d_name);
+		if (ret < 0 || (size_t)ret >= sizeof(path))
+			continue;
+		fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+		if (fd < 0)
+			continue;
+		if (has_key_power(fd)) {
+			DEBUG_PRINTF("Found power button at %s\n", path);
+			closedir(d);
+			return fd;
+		}
+		close(fd);
+	}
+
+	closedir(d);
+	DEBUG_PRINT("No power button input device found\n");
+	return -1;
+}
+
+// setup_signalfd: Block SIGCHLD, SIGINT and SIGTERM in the calling thread and
+// return a signalfd that delivers them as readable events. Must be called
+// before forking the app, so that no SIGCHLD is missed. The fd is non-blocking
+// (drain until EAGAIN) and close-on-exec.
+//
+// Return value:
+// The signalfd on success, or -1 on error.
+int setup_signalfd(void) {
+	sigset_t mask;
+	int fd = 0;
+
+	sigemptyset(&mask);
+	sigaddset(&mask, SIGCHLD);
+	sigaddset(&mask, SIGINT);
+	sigaddset(&mask, SIGTERM);
+
+	if (sigprocmask(SIG_BLOCK, &mask, NULL) < 0) {
+		perror("sigprocmask block");
+		return -1;
+	}
+
+	fd = signalfd(-1, &mask, SFD_CLOEXEC | SFD_NONBLOCK);
+	if (fd < 0) {
+		perror("signalfd");
+		return -1;
+	}
+	return fd;
+}
+
+// disable_cad: Ask the kernel to deliver a guest Ctrl+Alt+Del as SIGINT to PID 1
+// instead of triggering an immediate reboot. Firecracker's SendCtrlAltDel
+// (x86 only) reaches the guest this way. No observable effect on arm64/QEMU.
+void disable_cad(void) {
+	if (syscall(SYS_reboot, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2,
+		    LINUX_REBOOT_CMD_CAD_OFF, NULL) < 0) {
+		perror("reboot CAD_OFF");
+	}
 }

@@ -17,6 +17,8 @@ The key features of `urunit` are:
 - Reading and setting the environment variables for an application from a file.
 - Reading and setting the execution environment configuration for a process from a file.
 - Reading and mounting attached block devices defined in the configuration file.
+- Reacting to a guest power-button or Ctrl+Alt+Del event by asking the
+  application to terminate, then unmounting and shutting down.
 
 ## Building
 
