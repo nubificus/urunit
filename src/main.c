@@ -1253,20 +1253,20 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
+	// The bare initrd has no /dev, so create it and mount devtmpfs before the
+	// app starts and before we look for the power-button device node.
+	if (mkdir("/dev", 0755) < 0 && errno != EEXIST)
+		perror("mkdir /dev");
+	if (mount("dev", "/dev", "devtmpfs", MS_NOSUID, "mode=0755") < 0 &&
+	    errno != EBUSY)
+		perror("mount /dev devtmpfs");
+
 	DEBUG_PRINT("Spawn the app\n");
 	ret = spawn_app(argc, argv, &app_pid);
 	if (ret) {
 		fprintf(stderr, "Could not spawn app\n");
 		return ret;
 	}
-
-	// The bare initrd has no /dev, so create it and mount devtmpfs before we
-	// look for the power-button device node.
-	if (mkdir("/dev", 0755) < 0 && errno != EEXIST)
-		perror("mkdir /dev");
-	if (mount("dev", "/dev", "devtmpfs", MS_NOSUID, "mode=0755") < 0 &&
-	    errno != EBUSY)
-		perror("mount /dev devtmpfs");
 
 	// Open the power-button input device (may be -1 if the kernel exposes none;
 	// the SIGINT path still works in that case).
