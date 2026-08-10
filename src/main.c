@@ -42,6 +42,7 @@
 
 #include <sys/wait.h>
 #include <sys/stat.h>
+#include <signal.h>
 
 #include <errno.h>
 #include <string.h>
@@ -927,6 +928,20 @@ int child_func(char *argv[]) {
 	// make it the foreground process if there is a tty.
 	if (isolate_child()) {
 		return 1;
+	}
+
+	// The parent blocked SIGCHLD/SIGINT/SIGTERM before forking so they reach
+	// its signalfd. Reset the mask here so the app runs normally (execve keeps
+	// the signal mask but not the dispositions).
+	{
+		sigset_t mask;
+
+		sigemptyset(&mask);
+		sigaddset(&mask, SIGCHLD);
+		sigaddset(&mask, SIGINT);
+		sigaddset(&mask, SIGTERM);
+		if (sigprocmask(SIG_UNBLOCK, &mask, NULL) < 0)
+			perror("sigprocmask unblock");
 	}
 
 	// Check if we need to read any configuration for the app execution
