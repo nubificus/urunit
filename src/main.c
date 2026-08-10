@@ -43,6 +43,10 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <signal.h>
+#include <poll.h>
+#include <sys/signalfd.h>
+#include <linux/input.h>
+#include <sys/mount.h>
 
 #include <errno.h>
 #include <string.h>
@@ -1112,60 +1116,114 @@ int spawn_app(int argc, char *argv[], pid_t *child_pid) {
 	return 1;
 }
 
-int reap(const pid_t child_pid, int *child_exitcode_ptr) {
-	pid_t reaped_pid = 0;
-	int reaped_status = 0;
+// reap_children: Reap every exited child without blocking. If the app process
+// (app_pid) is among them, store its normalized exit code in *app_exitcode.
+//
+// Return value:
+// 1 if the app was reaped, 0 otherwise.
+static int reap_children(pid_t app_pid, int *app_exitcode) {
+	int app_reaped = 0;
+	pid_t pid = 0;
+	int status = 0;
 
-	while (1) {
-		reaped_pid = waitpid(-1, &reaped_status, 0);
-		switch (reaped_pid) {
-		case -1:
-			if (errno == ECHILD) {
-				break;
-			}
-			perror("reaping");
-			return 1;
-
-		case 0:
-			break;
-		default:
-			DEBUG_PRINTF("Reaped process %d ", reaped_pid);
-			// A child was reaped. Check whether it's the app.
-			// If it is, then set the exit_code,
-			if (reaped_pid == child_pid) {
-				if (WIFEXITED(reaped_status)) {
-					DEBUG_PRINTF("with exit status %d\n", WEXITSTATUS(reaped_status));
-					// The app exited normally
-					*child_exitcode_ptr = WEXITSTATUS(reaped_status);
-				} else if (WIFSIGNALED(reaped_status)) {
-					DEBUG_PRINTF("with exit status %d\n", WTERMSIG(reaped_status));
-					/* The app was terminated. Emulate what sh / bash
-					 * would do, which is to return
-					 * 128 + signal number.
-					 */
-					*child_exitcode_ptr = 128 + WTERMSIG(reaped_status);
-				} else {
-					DEBUG_PRINT("with unknown exit status\n");
-					return 1;
-				}
-
-				// Be safe, ensure the status code is indeed between 0 and 255.
-				*child_exitcode_ptr = *child_exitcode_ptr % (STATUS_MAX - STATUS_MIN + 1);
-
-			}
+	while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+		if (pid != app_pid)
+			continue;
+		if (WIFEXITED(status)) {
+			*app_exitcode = WEXITSTATUS(status);
+		} else if (WIFSIGNALED(status)) {
+			*app_exitcode = 128 + WTERMSIG(status);
+		} else {
 			continue;
 		}
-		/* If we make it here, that's because we did not continue in the switch case. */
-		break;
+		*app_exitcode = *app_exitcode % (STATUS_MAX - STATUS_MIN + 1);
+		app_reaped = 1;
+	}
+	return app_reaped;
+}
+
+// request_app_shutdown: Send SIGTERM to the app's process group once. The app
+// is its own process-group leader (isolate_child called setpgid(0,0)), so the
+// whole workload receives it. Repeated calls are a no-op via *triggered.
+static void request_app_shutdown(pid_t app_pid, int *triggered) {
+	if (*triggered)
+		return;
+	*triggered = 1;
+	DEBUG_PRINT("Shutdown event received, sending SIGTERM to the app\n");
+	if (kill(-app_pid, SIGTERM) < 0)
+		perror("kill app SIGTERM");
+}
+
+// wait_for_app: Wait until the app exits, reacting to shutdown events on the
+// way. Multiplex the signalfd (child exits, SIGINT, SIGTERM) and the optional
+// power-button device (btn_fd, -1 if none) with poll. On a shutdown event, ask
+// the app to terminate, then keep waiting for it to exit. No timeout: the
+// container manager's SIGKILL is the outer bound.
+//
+// Return value:
+// The app's exit code, or -1 if the loop broke on an unrecoverable error.
+static int wait_for_app(int sfd, int btn_fd, pid_t app_pid) {
+	int app_exitcode = -1;
+	int triggered = 0;
+
+	for (;;) {
+		struct pollfd fds[2];
+		int nfds = 0;
+
+		fds[nfds].fd = sfd;
+		fds[nfds].events = POLLIN;
+		fds[nfds].revents = 0;
+		nfds++;
+		if (btn_fd >= 0) {
+			fds[nfds].fd = btn_fd;
+			fds[nfds].events = POLLIN;
+			fds[nfds].revents = 0;
+			nfds++;
+		}
+
+		if (poll(fds, nfds, -1) < 0) {
+			if (errno == EINTR)
+				continue;
+			perror("poll");
+			break;
+		}
+
+		// Signalfd is always fds[0]. Drain it (non-blocking, until EAGAIN).
+		if (fds[0].revents & POLLIN) {
+			struct signalfd_siginfo si;
+
+			while (read(sfd, &si, sizeof(si)) == (ssize_t)sizeof(si)) {
+				if (si.ssi_signo == SIGCHLD) {
+					if (reap_children(app_pid, &app_exitcode))
+						return app_exitcode;
+				} else {
+					// SIGINT (Firecracker C-A-D) or SIGTERM.
+					request_app_shutdown(app_pid, &triggered);
+				}
+			}
+		}
+
+		// Power-button device is fds[1] when present. Drain it.
+		if (btn_fd >= 0 && (fds[1].revents & POLLIN)) {
+			struct input_event ev;
+
+			while (read(btn_fd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
+				if (ev.type == EV_KEY && ev.code == KEY_POWER &&
+				    ev.value == 1)
+					request_app_shutdown(app_pid, &triggered);
+			}
+		}
 	}
 
-	return 0;
+	return app_exitcode;
 }
 
 int main(int argc, char *argv[]) {
 	pid_t app_pid;
 	int ret = 0;
 	int app_exitcode = -1;
+	int sfd = -1;
+	int btn_fd = -1;
 	char *should_set_def_route = NULL;
 
 	should_set_def_route = getenv("URUNIT_DEFROUTE");
@@ -1177,10 +1235,21 @@ int main(int argc, char *argv[]) {
 		}
 	}
 
+	// Route a guest Ctrl+Alt+Del (Firecracker x86) to PID 1 as SIGINT.
+	disable_cad();
+
 	DEBUG_PRINT("Setting subreaper\n");
 	ret = set_subreaper();
 	if (ret < 0) {
 		perror("Become subreaper");
+		return 1;
+	}
+
+	// Block the shutdown-related signals and read them through a signalfd.
+	// Must happen before spawn_app so that no SIGCHLD is missed.
+	sfd = setup_signalfd();
+	if (sfd < 0) {
+		fprintf(stderr, "Failed to set up signalfd\n");
 		return 1;
 	}
 
@@ -1191,18 +1260,25 @@ int main(int argc, char *argv[]) {
 		return ret;
 	}
 
-	DEBUG_PRINT("Starting reaping loop\n");
-	while (1) {
-		ret = reap(app_pid, &app_exitcode);
-		if (ret) {
-			fprintf(stderr, "Error while reaping %d", ret);
-			break;
-		}
+	// The bare initrd has no /dev, so create it and mount devtmpfs before we
+	// look for the power-button device node.
+	if (mkdir("/dev", 0755) < 0 && errno != EEXIST)
+		perror("mkdir /dev");
+	if (mount("dev", "/dev", "devtmpfs", MS_NOSUID, "mode=0755") < 0 &&
+	    errno != EBUSY)
+		perror("mount /dev devtmpfs");
 
-		if (app_exitcode != -1) {
-			break;
-		}
-	}
+	// Open the power-button input device (may be -1 if the kernel exposes none;
+	// the SIGINT path still works in that case).
+	btn_fd = open_power_button();
+
+	DEBUG_PRINT("Waiting for the app\n");
+	app_exitcode = wait_for_app(sfd, btn_fd, app_pid);
+	DEBUG_PRINTF("App exited with code %d\n", app_exitcode);
+
+	if (btn_fd >= 0)
+		close(btn_fd);
+	close(sfd);
 
 	DEBUG_PRINT("Exiting, will reboot in order to shutdown\n");
 	sync();
