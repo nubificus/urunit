@@ -70,8 +70,12 @@ following information:
 
 - The list of the environment variables to set for the application
 - The configuration for the process execution environment.
+- The application command to execute, when `urunit` is started without a
+  command line (optional).
 - The list of mounts of block devices. Each block device is defined by its
   serial id and it will get mounted in the defined mountpoint.
+- The network configuration (IP address, gateway and netmask) for guests
+  that can not get it from the kernel command line (optional).
 
 The file can be specified to `urunit` setting the `URUNIT_CONFIG`
 environment variable with the path to the configuration file.
@@ -86,13 +90,31 @@ UCS
 UID: <uid_for_the_application>
 GID: <gid_for_the_application>
 WD:  <working_directory>
+ARC: <number_of_application_arguments>
+ARV: <application_argument>
+...
 UCE
 UBS
 ID: <serial_id>
 MP: <mountpoint>
 ...
 UBE
+UNS
+IP:  <ipv4_address>
+GW:  <gateway>
+MSK: <netmask>
+UNE
 ```
+
+Inside the `UCS` section, the application command is optional: `ARC` holds the
+number of arguments and is followed by exactly that many `ARV` lines, one per
+argument, each taken verbatim. It is used when `urunit` is started without a
+command line, in which case the command from the configuration is executed.
+
+The `UNS` section is optional and provides the network configuration for
+guests that can not get it from the kernel command line: `IP` is the IPv4
+address, `GW` the gateway and `MSK` the netmask. An empty value (e.g. `IP:`)
+leaves the field unset.
 
 ## Installation
 
