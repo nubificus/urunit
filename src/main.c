@@ -59,6 +59,8 @@ struct process_config {
 	uint32_t uid;
 	uint32_t gid;
 	char     *wdir;
+	uint32_t argc;
+	char     **argv;
 };
 
 struct app_exec_config {
@@ -426,6 +428,8 @@ int get_string_val(char *str, char **value) {
 // UID:<uid>
 // GID:<gid>
 // WD:<working directory>
+// ARC:<number of arguments>      (optional, followed by ARC lines of)
+// ARV:<argument>                 (taken verbatim)
 // UCE
 // It is important to note, that this function will alter the given list,
 // replacing the new line characters with the end of string '\0' character.
@@ -444,6 +448,7 @@ int get_string_val(char *str, char **value) {
 struct process_config *parse_process_config(char **string_area, size_t max_sz) {
 	struct process_config *conf = NULL;
 	char *tmp_field = NULL;
+	uint32_t found_argv = 0;
 
 	conf = malloc(sizeof(struct process_config));
 	if (!conf) {
@@ -452,6 +457,8 @@ struct process_config *parse_process_config(char **string_area, size_t max_sz) {
 	}
 	memset(conf, 0, sizeof(struct process_config));
 	conf->wdir = NULL; // Sanity
+	conf->argv = NULL;
+	conf->argc = 0;
 
 	tmp_field = strtok(*string_area, "\n");
 	// Discard the first string since it is the special string "UCS"
@@ -461,7 +468,7 @@ struct process_config *parse_process_config(char **string_area, size_t max_sz) {
 	while (tmp_field && ((size_t)(tmp_field - *string_area) < max_sz)) {
 		int ret = 0;
 
-		if (memcmp(tmp_field, "UID", 3) == 0) {
+		if (memcmp(tmp_field, "UID:", 4) == 0) {
 			ret = get_uint_val(tmp_field, &(conf->uid));
 			if (ret != 0) {
 				fprintf(stderr, "Failed to retreive UID information from %s\n", tmp_field);
@@ -479,7 +486,44 @@ struct process_config *parse_process_config(char **string_area, size_t max_sz) {
 				fprintf(stderr, "Failed to retreive WD information from %s\n", tmp_field);
 				break;
 			}
+		} else if (memcmp(tmp_field, "ARC:", 4) == 0) {
+			// Number of arguments of the application command. It
+			// must precede the ARV entries.
+			uint32_t argc = 0;
+
+			ret = get_uint_val(tmp_field, &argc);
+			if (ret != 0 || conf->argv != NULL) {
+				fprintf(stderr, "Failed to retrieve ARC information from %s\n", tmp_field);
+				break;
+			}
+			// Compute the element count in size_t. argc is uint32_t, so
+			// "argc + 1" alone is 32-bit unsigned and wraps to 0 for
+			// argc == UINT32_MAX, handing calloc a zero-size allocation
+			// that the following ARV writes would then overflow. In size_t
+			// the +1 cannot wrap, and an oversized count fails calloc below.
+			conf->argv = calloc((size_t)argc + 1, sizeof(char *));
+			if (!conf->argv) {
+				fprintf(stderr, "Failed to allocate memory for the application arguments\n");
+				break;
+			}
+			conf->argc = argc;
+			found_argv = 0;
+		} else if (memcmp(tmp_field, "ARV:", 4) == 0) {
+			// One argument of the application command, taken verbatim
+			// (it may contain spaces or be empty).
+			if (conf->argv == NULL || found_argv >= conf->argc) {
+				fprintf(stderr, "Unexpected ARV entry %s\n", tmp_field);
+				break;
+			}
+			// We keep any argument verbatim because anything can be
+			// an argument (except a new line which is not supported)
+			conf->argv[found_argv++] = tmp_field + 4;
+			DEBUG_PRINTF("Found argument %s\n", tmp_field + 4);
 		} else 	if (memcmp(tmp_field, "UCE", 3) == 0) {
+			if (conf->argv != NULL && found_argv != conf->argc) {
+				fprintf(stderr, "Expected %u arguments, found %u\n", conf->argc, found_argv);
+				break;
+			}
 			*string_area = tmp_field + 4; // 4 bytes for the "UCE" string
 			return conf;
 		}
@@ -487,6 +531,7 @@ struct process_config *parse_process_config(char **string_area, size_t max_sz) {
 		tmp_field = strtok(NULL, "\n");
 	}
 
+	free(conf->argv);
 	free(conf);
 	return NULL;
 }
@@ -971,9 +1016,12 @@ int setup_exec_env(struct process_config *process_conf) {
 	return 0;
 }
 
-int child_func(char *argv[]) {
+int child_func(int argc, char *argv[]) {
 	struct app_exec_config *app_config = NULL;
 	char *app_config_buf = NULL;
+	// The command line was already reassembled by spawn_app. When there is
+	// none, the application command comes from the configuration instead.
+	char **exec_argv = argv;
 	int ret = 0;
 
 	DEBUG_PRINT("Isolating child\n");
@@ -983,10 +1031,38 @@ int child_func(char *argv[]) {
 		return 1;
 	}
 
-	if (load_app_config(&app_config, &app_config_buf) != 0) {
+	// Load the configuration (if any) and apply everything that depends on
+	// it here in the child.
+	ret = load_app_config(&app_config, &app_config_buf);
+	if (ret != 0) {
 		fprintf(stderr, "Failed to load the configuration\n");
 		return 1;
 	}
+
+	// No command line (e.g. started by the FreeBSD kernel as init): take the
+	// application command from the configuration, where every argument is
+	// already separated and the array is NULL terminated.
+	if (argc < 2 && app_config && app_config->pr_conf &&
+	    app_config->pr_conf->argv && app_config->pr_conf->argc > 0) {
+		DEBUG_PRINT("Taking the application command from the configuration\n");
+		exec_argv = app_config->pr_conf->argv;
+	}
+
+	if (exec_argv[0] == NULL) {
+		fprintf(stderr, "No application execute\n");
+		ret = 1;
+		goto child_func_free;
+	}
+#ifdef DEBUG
+	printf("Starting app %s with the following arguments\n", exec_argv[0]);
+	for (int i = 1; exec_argv[i] != NULL; i++) {
+		printf("%s\n", exec_argv[i]);
+	}
+	printf("Environment variables\n");
+	for (char **env = environ; *env != NULL; env++) {
+		printf("%s\n", *env);
+	}
+#endif
 	if (app_config) {
 		ret = mount_block_vols(app_config->blk_conf);
 		if (ret != 0) {
@@ -998,15 +1074,17 @@ int child_func(char *argv[]) {
 			fprintf(stderr, "Failed to set up the process execution environment\n");
 			goto child_func_free;
 		}
-		ret = manual_execvpe(app_config->path_env, argv[0], argv, app_config->envs);
+		ret = manual_execvpe(app_config->path_env, exec_argv[0], exec_argv, app_config->envs);
 	} else {
 		DEBUG_PRINT("No configuration, simply execvp\n");
-		ret = manual_execvpe(NULL, argv[0], argv, NULL);
+		ret = manual_execvpe(NULL, exec_argv[0], exec_argv, NULL);
 	}
 	// If we returned something went wrong
 child_func_free:
 	if (app_config) {
 		free(app_config->envs);
+		if (app_config->pr_conf)
+			free(app_config->pr_conf->argv);
 		free(app_config->pr_conf);
 		free(app_config);
 	}
@@ -1118,32 +1196,17 @@ int spawn_app(int argc, char *argv[], pid_t *child_pid) {
 	}
 	new_argv[new_argc] = NULL;
 
-	if (new_argc <= 0 || new_argv[0] == NULL) {
-		fprintf(stderr, "No application execute\n");
-		return 1;
-	}
-#ifdef DEBUG
-	printf("Starting app %s with the following arguments\n", new_argv[0]);
-	for (int i = 1; i < new_argc; i++) {
-		printf("%s\n", new_argv[i]);
-	}
-	printf("Environment variables\n");
-	for (char **env = environ; *env != NULL; env++) {
-		printf("%s\n", *env);
-	}
-#endif
 	pid = fork();
 	if (pid < 0) {
 		perror("fork");
 		return 1;
 	} else if (pid == 0) {
-		return child_func(new_argv);
-	} else {
-		*child_pid = pid;
-		return 0;
+		return child_func(argc, new_argv);
 	}
 
-	return 1;
+	*child_pid = pid;
+
+	return 0;
 }
 
 int reap(const pid_t child_pid, int *child_exitcode_ptr) {
