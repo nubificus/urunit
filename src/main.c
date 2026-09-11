@@ -68,6 +68,7 @@ struct app_exec_config {
 	char	 *path_env;
 	struct process_config *pr_conf;
 	struct block_config **blk_conf;
+	struct net_config *net_conf;
 };
 
 extern char **environ;
@@ -128,14 +129,19 @@ int isolate_child(void) {
 // 2. sz:	The amount of bytes to read
 //
 // Return value:
-// On success it returns a buffer of sz size with all bytes read.
+// On success it returns a buffer of sz + 1 bytes: the sz bytes read from the
+// file followed by a trailing NUL, so callers can treat it as a string (the
+// same contract as the raw-device path). The caller frees it.
 // On failure, it returns NULL.
 char *read_exact_size(FILE *f, size_t sz) {
 	size_t total_read = 0;
 	size_t bytes_read = 0;
 	char *buffer = NULL;
 
-	buffer = malloc(sz);
+	// Allocate one extra byte for a trailing NUL so the buffer is a valid
+	// C string; the section parsers (strtok) and the memcmp probes in
+	// get_config_from_file rely on it, as read_raw_device already does.
+	buffer = malloc(sz + 1);
 	if (!buffer) {
 		fprintf(stderr, "Failed to allocate memory for file contents\n");
 		return NULL;
@@ -163,6 +169,8 @@ char *read_exact_size(FILE *f, size_t sz) {
 		fprintf(stderr, "Read %zu bytes, expected %zu bytes\n", total_read, sz);
 		goto read_exact_error;
 	}
+
+	buffer[sz] = '\0';
 
 	return buffer;
 
@@ -536,6 +544,79 @@ struct process_config *parse_process_config(char **string_area, size_t max_sz) {
 	return NULL;
 }
 
+// parse_net_config: Parses a list with the following format:
+// UNS
+// IP:<ipv4 address>
+// GW:<gateway>
+// MSK:<netmask>
+// UNE
+// It is used by guests that can not get the network configuration from the
+// kernel command line (e.g. FreeBSD). It alters the given list, replacing the
+// new line characters with '\0'. The caller is responsible to free the
+// returned memory.
+//
+// Arguments:
+// 1. string_area:	The list with in the aformentioned format.
+// 2. max_sz:		The max possible size of the list.
+//
+// Return value:
+// On success it returns a pointer to a dynamically allocated net_config.
+// Otherwise, NULL is returned
+struct net_config *parse_net_config(char **string_area, size_t max_sz) {
+	struct net_config *conf = NULL;
+	char *tmp_field = NULL;
+
+	conf = malloc(sizeof(struct net_config));
+	if (!conf) {
+		fprintf(stderr, "Failed to allocate memory for network config\n");
+		return NULL;
+	}
+	memset(conf, 0, sizeof(struct net_config));
+	// just for snaity
+	conf->ip = NULL;
+	conf->gateway = NULL;
+	conf->mask = NULL;
+
+	tmp_field = strtok(*string_area, "\n");
+	// Discard the first string since it is the special string "UNS"
+	tmp_field = strtok(NULL, "\n");
+	while (tmp_field && ((size_t)(tmp_field - *string_area) < max_sz)) {
+		int ret = 0;
+
+		// An empty value (e.g. "IP:") means the field is not set.
+		if (memcmp(tmp_field, "IP:", 3) == 0) {
+			ret = get_string_val(tmp_field, &(conf->ip));
+			if (ret != 0) {
+				conf->ip = NULL;
+				fprintf(stderr, "Failed to retreive IP information from %s\n", tmp_field);
+			}
+		} else if (memcmp(tmp_field, "GW:", 3) == 0) {
+			ret = get_string_val(tmp_field, &(conf->gateway));
+			if (ret != 0) {
+				conf->gateway = NULL;
+				fprintf(stderr, "Failed to retreive GW information from %s\n", tmp_field);
+			}
+		} else if (memcmp(tmp_field, "MSK:", 4) == 0) {
+			ret = get_string_val(tmp_field, &(conf->mask));
+			if (ret != 0) {
+				conf->mask = NULL;
+				fprintf(stderr, "Failed to retreive MSK information from %s\n", tmp_field);
+			}
+		} else if (memcmp(tmp_field, "UNE", 3) == 0) {
+			*string_area = tmp_field + 4; // 4 bytes for the "UNE" string
+			DEBUG_PRINTF("Found network config ip=%s gw=%s mask=%s\n",
+				     conf->ip ? conf->ip : "", conf->gateway ? conf->gateway : "",
+				     conf->mask ? conf->mask : "");
+			return conf;
+		}
+
+		tmp_field = strtok(NULL, "\n");
+	}
+
+	free(conf);
+	return NULL;
+}
+
 // parse_block_config Parses a list with the following format:
 // UBS
 // ID: <serial_id>
@@ -685,6 +766,7 @@ struct app_exec_config *get_config_from_file(char *file, char **sbuf) {
 	struct app_exec_config *econf = NULL;
 	struct process_config *pconf = NULL;
 	struct block_config **bconf = NULL;
+	struct net_config *nconf = NULL;
 	char *conf_area = NULL;
 
 	buf = read_file_and_size(file, &size);
@@ -698,7 +780,7 @@ struct app_exec_config *get_config_from_file(char *file, char **sbuf) {
 	// Check if the special string "UES" is present
 	// which means that now starts the environment variable
 	// list.
-	if (memcmp(conf_area, "UES", 3) == 0) {
+	if (size >= 3 && memcmp(conf_area, "UES", 3) == 0) {
 		char *init_conf_area = conf_area;
 		// Extract the environment variables from the list
 		env_vars = parse_envs(&conf_area, size, &path_env);
@@ -722,7 +804,7 @@ struct app_exec_config *get_config_from_file(char *file, char **sbuf) {
 	// Check if the special string "UCS" is present
 	// which means that now starts the configuration for the application
 	// execution environment
-	if (memcmp(conf_area, "UCS", 3) == 0) {
+	if (size >= 3 && memcmp(conf_area, "UCS", 3) == 0) {
 		char *init_conf_area = conf_area;
 		// Extract the environment variables from the list
 		pconf = parse_process_config(&conf_area, size);
@@ -745,7 +827,7 @@ struct app_exec_config *get_config_from_file(char *file, char **sbuf) {
 	DEBUG_PRINT("Checking for block volumes mount configuration\n");
 	// Check if the special string "UBS" is present
 	// which means that now starts the configuration for the block mounts
-	if (memcmp(conf_area, "UBS", 3) == 0) {
+	if (size >= 3 && memcmp(conf_area, "UBS", 3) == 0) {
 		char *init_conf_area = conf_area;
 		// Extract the block configuration
 		bconf = parse_block_config(&conf_area, size);
@@ -763,6 +845,23 @@ struct app_exec_config *get_config_from_file(char *file, char **sbuf) {
 		size -= conf_area - init_conf_area;
 	}
 
+	DEBUG_PRINT("Checking for network configuration\n");
+	// Check if the special string "UNS" is present
+	// which means that now starts the network configuration
+	if (size >= 3 && memcmp(conf_area, "UNS", 3) == 0) {
+		char *init_conf_area = conf_area;
+
+		nconf = parse_net_config(&conf_area, size);
+		if (!nconf) {
+			fprintf(stderr, "Warning: No network configuration was found\n");
+		}
+		if (conf_area == init_conf_area) {
+			fprintf(stderr, "Invalid format of network configuration\n");
+			goto get_env_vars_error_free;
+		}
+		size -= conf_area - init_conf_area;
+	}
+
 	econf = malloc(sizeof(struct app_exec_config));
 	if (!econf) {
 		fprintf(stderr, "Could not allocate memory for app exec config struct\n");
@@ -774,9 +873,15 @@ struct app_exec_config *get_config_from_file(char *file, char **sbuf) {
 	econf->path_env = path_env;
 	econf->pr_conf = pconf;
 	econf->blk_conf = bconf;
+	econf->net_conf = nconf;
 	return econf;
 
 get_env_vars_error_free:
+	free(env_vars);
+	if (pconf)
+		free(pconf->argv);
+	free(pconf);
+	free(nconf);
 	free(buf);
 	return NULL;
 }
@@ -1039,6 +1144,14 @@ int child_func(int argc, char *argv[]) {
 		return 1;
 	}
 
+	// Configure the network if the configuration provides it.
+	if (app_config && app_config->net_conf) {
+		DEBUG_PRINT("Configuring the network\n");
+		if (configure_network(app_config->net_conf) != 0) {
+			fprintf(stderr, "Failed to configure the network\n");
+		}
+	}
+
 	// No command line (e.g. started by the FreeBSD kernel as init): take the
 	// application command from the configuration, where every argument is
 	// already separated and the array is NULL terminated.
@@ -1086,6 +1199,7 @@ child_func_free:
 		if (app_config->pr_conf)
 			free(app_config->pr_conf->argv);
 		free(app_config->pr_conf);
+		free(app_config->net_conf);
 		free(app_config);
 	}
 	free(app_config_buf);

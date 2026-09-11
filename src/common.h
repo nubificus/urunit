@@ -41,6 +41,12 @@ struct block_config {
 	char *mountpoint;
 };
 
+struct net_config {
+	char *ip;
+	char *gateway;
+	char *mask;
+};
+
 int ensure_dir(const char *path);
 int mkdir_all(const char *path, mode_t mode, char *first_dir);
 int rm_empty_dirs(const char *dir, const char *top_dir);
