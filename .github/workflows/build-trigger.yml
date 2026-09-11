@@ -32,6 +32,7 @@ jobs:
               - 'VERSION'
             dockerfile:
               - 'Dockerfile'
+              - 'Dockerfile.freebsd'
             c:
               - 'Makefile'
               - 'main.c'
