@@ -1,0 +1,38 @@
+# Builds the FreeBSD static urunit and packages it into a scratch image.
+#
+# The build runs on a Linux builder and cross-compiles for FreeBSD with clang +
+# lld against a sysroot extracted from the FreeBSD base distribution. The final
+# scratch stage only copies the binary, so nothing FreeBSD is ever executed at
+# build time. Stamp the image OS with buildx, e.g.:
+#
+#   docker buildx build --platform freebsd/amd64 -f Dockerfile.freebsd .
+#
+# which sets os=freebsd in the resulting image config.
+
+FROM --platform=$BUILDPLATFORM alpine AS builder
+
+ARG FREEBSD_VERSION=14.3-RELEASE
+ARG TARGET_TRIPLE=x86_64-unknown-freebsd14.3
+
+WORKDIR /urunit
+
+RUN apk add --no-cache clang lld make curl tar xz
+
+# FreeBSD sysroot: headers plus the (static) libraries and startup objects from
+# the base distribution. Only the parts a sysroot needs are extracted.
+RUN mkdir -p /sysroot && \
+    curl -fsSL "https://download.freebsd.org/releases/amd64/amd64/${FREEBSD_VERSION}/base.txz" \
+      | tar -xJf - -C /sysroot ./lib ./usr/lib ./usr/include
+
+COPY Makefile .
+COPY src src
+
+# TARGET_OS must be explicit: the Makefile would otherwise infer the OS from the
+# Linux builder's uname. Everything the cross toolchain needs rides on CC.
+RUN make TARGET_OS=FreeBSD \
+      CC="clang --target=${TARGET_TRIPLE} --sysroot=/sysroot -fuse-ld=lld" \
+      static
+
+FROM scratch
+COPY --from=builder /urunit/dist/urunit_static /urunit
+ENTRYPOINT ["/urunit"]
