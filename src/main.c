@@ -1438,4 +1438,6 @@ int main(int argc, char *argv[]) {
 	sync();
 	unmount_external();
 	request_reboot();
+
+	return 0;
 }
