@@ -90,6 +90,7 @@ UCS
 UID: <uid_for_the_application>
 GID: <gid_for_the_application>
 WD:  <working_directory>
+STDIN: 0
 ARC: <number_of_application_arguments>
 ARV: <application_argument>
 ...
@@ -110,6 +111,8 @@ Inside the `UCS` section, the application command is optional: `ARC` holds the
 number of arguments and is followed by exactly that many `ARV` lines, one per
 argument, each taken verbatim. It is used when `urunit` is started without a
 command line, in which case the command from the configuration is executed.
+`STDIN: 0` is also optional and means that the application has no stdin
+attached: `urunit` gives it `/dev/null` as stdin instead of the console.
 
 The `UNS` section is optional and provides the network configuration for
 guests that can not get it from the kernel command line: `IP` is the IPv4

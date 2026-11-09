@@ -61,6 +61,7 @@ struct process_config {
 	char     *wdir;
 	uint32_t argc;
 	char     **argv;
+	uint32_t no_stdin;
 };
 
 struct app_exec_config {
@@ -436,6 +437,7 @@ int get_string_val(char *str, char **value) {
 // UID:<uid>
 // GID:<gid>
 // WD:<working directory>
+// STDIN:0                        (optional, the application has no stdin)
 // ARC:<number of arguments>      (optional, followed by ARC lines of)
 // ARV:<argument>                 (taken verbatim)
 // UCE
@@ -527,6 +529,15 @@ struct process_config *parse_process_config(char **string_area, size_t max_sz) {
 			// an argument (except a new line which is not supported)
 			conf->argv[found_argv++] = tmp_field + 4;
 			DEBUG_PRINTF("Found argument %s\n", tmp_field + 4);
+		} else if (memcmp(tmp_field, "STDIN:", 6) == 0) {
+			uint32_t has_stdin = 1;
+
+			ret = get_uint_val(tmp_field, &has_stdin);
+			if (ret != 0) {
+				fprintf(stderr, "Failed to retrieve STDIN information from %s\n", tmp_field);
+				break;
+			}
+			conf->no_stdin = (has_stdin == 0);
 		} else 	if (memcmp(tmp_field, "UCE", 3) == 0) {
 			if (conf->argv != NULL && found_argv != conf->argc) {
 				fprintf(stderr, "Expected %u arguments, found %u\n", conf->argc, found_argv);
@@ -1093,6 +1104,19 @@ int setup_exec_env(struct process_config *process_conf) {
 	if (!process_conf) {
 		DEBUG_PRINT("Empty config, nothing to be done\n");
 		return 0;
+	}
+
+	if (process_conf->no_stdin) {
+		// Give the app /dev/null as stdin, so it does not think it runs on
+		// terminal. On failure, it keeps the console.
+		int null_fd = open("/dev/null", O_RDONLY);
+
+		if (null_fd < 0 || dup2(null_fd, STDIN_FILENO) < 0) {
+			perror("redirect stdin to /dev/null");
+		}
+		if (null_fd > STDIN_FILENO) {
+			close(null_fd);
+		}
 	}
 
 	DEBUG_PRINTF("Setting gid to %d\n", process_conf->gid);
