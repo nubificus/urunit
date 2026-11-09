@@ -44,6 +44,8 @@ URUNIT_SRC := ${SOURCE_DIR}/main.c ${SOURCE_DIR}/common.c
 # Header files
 URUNIT_HDR := ${SOURCE_DIR}/common.h
 
+TEST_BIN := $(BUILD_DIR)/config_parser_test
+
 # Install dependencies variables
 #
 # If we have already built either static or dynamic version of urunit
@@ -127,6 +129,13 @@ $(URUNIT_BIN_STATIC): $(URUNIT_SRC) $(URUNIT_HDR) | prepare
 
 $(URUNIT_BIN_STATIC_DEBUG): $(URUNIT_SRC) $(URUNIT_HDR) | prepare
 	$(CC) $(CFLAGS) -DDEBUG $(URUNIT_SRC) $(LDFLAGS) $(STATIC_LDFLAGS) -o $@
+
+.PHONY: test
+test: $(TEST_BIN)
+	$(TEST_BIN)
+
+$(TEST_BIN): tests/config_parser_test.c $(URUNIT_HDR) | prepare
+	$(CC) $(CFLAGS) $< -o $@
 
 ## install Install urunit in PREFIX
 .PHONY: install

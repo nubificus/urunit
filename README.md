@@ -80,30 +80,34 @@ following information:
 The file can be specified to `urunit` setting the `URUNIT_CONFIG`
 environment variable with the path to the configuration file.
 
-The supported format of the configuration file is the following:
+Every section marker and value record is terminated by NUL (`\\0`), which
+allows newlines to be preserved in environment variables, paths and application
+arguments. The supported format of the configuration file is the following
+(the `\\0` terminators are shown explicitly):
 
 ```
-UES
-/* list of environment variables */
-UEE
-UCS
-UID: <uid_for_the_application>
-GID: <gid_for_the_application>
-WD:  <working_directory>
-ARC: <number_of_application_arguments>
-ARV: <application_argument>
+UES\0
+<environment variable>\0
 ...
-UCE
-UBS
-ID: <serial_id>
-MP: <mountpoint>
+UEE\0
+UCS\0
+UID:<uid_for_the_application>\0
+GID:<gid_for_the_application>\0
+WD:<working_directory>\0
+ARC:<number_of_application_arguments>\0
+ARV:<application_argument>\0
 ...
-UBE
-UNS
-IP:  <ipv4_address>
-GW:  <gateway>
-MSK: <netmask>
-UNE
+UCE\0
+UBS\0
+ID:<serial_id>\0
+MP:<mountpoint>\0
+...
+UBE\0
+UNS\0
+IP:<ipv4_address>\0
+GW:<gateway>\0
+MSK:<netmask>\0
+UNE\0
 ```
 
 Inside the `UCS` section, the application command is optional: `ARC` holds the
